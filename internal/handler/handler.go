@@ -360,12 +360,25 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 	if task.Status == model.StatusDone {
 		notify.AsyncNotify(h.notifier, task)
 	}
+
+	var blockedDownstream []model.BlockedDownstream
 	if task.Status == model.StatusFailed {
 		notify.AsyncNotify(h.notifier, task) // Discord webhook to user
 		h.handleFailedTask(task)             // SessionNotifier to CEO (if no auto-retry)
+
+		// V7: scan blocked downstream tasks (read-only).
+		if bd, err := h.store.ScanBlockedDownstream(id); err != nil {
+			log.Printf("[handler] ScanBlockedDownstream for %s: %v", id, err)
+		} else {
+			blockedDownstream = bd
+		}
 	}
 
-	writeJSON(w, http.StatusOK, model.PatchTaskResponse{Task: task, Triggered: triggered})
+	writeJSON(w, http.StatusOK, model.PatchTaskResponse{
+		Task:              task,
+		Triggered:         triggered,
+		BlockedDownstream: blockedDownstream,
+	})
 }
 
 // handleFailedTask is called asynchronously when a task transitions to failed.
@@ -398,17 +411,27 @@ func (h *Handler) handleFailedTask(task model.Task) {
 }
 
 // autoRetry creates a new task for the retry agent and dispatches it.
+// V7: retry task inherits original.DependsOn; original.superseded_by is set to retry task ID.
 // Per spec: does NOT notify CEO.
 func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 	failureDesc := original.FailureReason
 	if failureDesc == "" {
 		failureDesc = original.Result
 	}
+
+	// Fetch original task details to get DependsOn (may not be populated in task passed in).
+	origDetail, err := h.store.GetByID(original.ID)
+	if err != nil {
+		log.Printf("[handler] autoRetry: GetByID original %s failed: %v", original.ID, err)
+		origDetail = original // fallback
+	}
+
 	newTask, err := h.store.CreateTask(model.CreateTaskRequest{
 		Title:       "retry: " + original.Title,
 		AssignedTo:  retryAgent,
 		Priority:    original.Priority,
 		Description: "failed原因: " + failureDesc,
+		DependsOn:   origDetail.DependsOn, // V7: inherit original deps
 	})
 	if err != nil {
 		log.Printf("[handler] autoRetry CreateTask failed for original %s: %v", original.ID, err)
@@ -416,6 +439,12 @@ func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 	}
 	log.Printf("[handler] autoRetry: created task %s for agent %s (original: %s)",
 		newTask.ID, retryAgent, original.ID)
+
+	// V7: mark original as superseded by the retry task.
+	if err := h.store.SetSupersededBy(original.ID, newTask.ID); err != nil {
+		log.Printf("[handler] autoRetry SetSupersededBy failed (original %s → retry %s): %v",
+			original.ID, newTask.ID, err)
+	}
 
 	// Dispatch to expert session (no CEO notification per spec).
 	sessionKey, known := openclaw.SessionKey(retryAgent)

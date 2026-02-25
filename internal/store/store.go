@@ -89,7 +89,7 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 		args = append(args, parentID)
 	}
 
-	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.parent_id,
+	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.superseded_by, t.parent_id,
 	                 t.mode, t.requires_review, t.result, t.failure_reason, t.version, t.priority, t.started_at, t.created_at, t.updated_at
 	          FROM tasks t
 	          WHERE ` + strings.Join(where, " AND ") + `
@@ -137,7 +137,7 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 // GetByID returns a single task with its depends_on list and history.
 func (s *Store) GetByID(id string) (model.Task, error) {
 	row := s.db.QueryRow(`
-		SELECT id, title, description, status, assigned_to, retry_assigned_to, parent_id,
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by, parent_id,
 		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
@@ -236,7 +236,7 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 
 	// Fetch current task inside the transaction.
 	row := tx.QueryRow(`
-		SELECT id, title, description, status, assigned_to, retry_assigned_to, parent_id,
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by, parent_id,
 		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
@@ -273,7 +273,7 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 		}
 
 		// On timeout/release back to pending, clear assigned_to.
-		// On failed→pending retry: apply retry_assigned_to if set.
+		// On failed→pending retry: apply retry_assigned_to if set; also clear superseded_by.
 		if newStatus == model.StatusPending {
 			retryTo := current.RetryAssignedTo
 			// Allow PATCH body to override retry_assigned_to at retry time.
@@ -286,6 +286,10 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 				setClauses = append(setClauses, "retry_assigned_to = ''")
 			} else {
 				setClauses = append(setClauses, "assigned_to = ''")
+			}
+			// Clear superseded_by when retrying to prevent double-unlock conflicts.
+			if current.Status == model.StatusFailed {
+				setClauses = append(setClauses, "superseded_by = ''")
 			}
 		}
 	} else {
@@ -340,6 +344,72 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 
 	task, err := s.GetByID(id)
 	return task, triggered, err
+}
+
+// -------------------------------------------------------------------
+// SupersededBy helpers
+// -------------------------------------------------------------------
+
+// SetSupersededBy marks originalID.superseded_by = retryID.
+// Called by autoRetry after creating the retry task.
+func (s *Store) SetSupersededBy(originalID, retryID string) error {
+	_, err := s.db.Exec(
+		`UPDATE tasks SET superseded_by = ?, updated_at = ? WHERE id = ?`,
+		retryID, time.Now().UTC(), originalID)
+	if err != nil {
+		return fmt.Errorf("set superseded_by: %w", err)
+	}
+	return nil
+}
+
+// ScanBlockedDownstream returns all pending/claimed tasks that (directly or
+// indirectly) depend on failedID. This is a read-only scan; no state is
+// modified.
+func (s *Store) ScanBlockedDownstream(failedID string) ([]model.BlockedDownstream, error) {
+	visited := make(map[string]struct{})
+	var result []model.BlockedDownstream
+
+	var walk func(id string) error
+	walk = func(id string) error {
+		rows, err := s.db.Query(`
+			SELECT td.task_id, t.title, t.assigned_to
+			FROM task_deps td
+			JOIN tasks t ON t.id = td.task_id
+			WHERE td.depends_on = ?
+			  AND t.status IN ('pending','claimed')`, id)
+		if err != nil {
+			return fmt.Errorf("scan downstream of %s: %w", id, err)
+		}
+		var children []model.BlockedDownstream
+		for rows.Next() {
+			var b model.BlockedDownstream
+			if err = rows.Scan(&b.ID, &b.Title, &b.AssignedTo); err != nil {
+				rows.Close() //nolint:errcheck
+				return err
+			}
+			children = append(children, b)
+		}
+		rows.Close() //nolint:errcheck
+		if err = rows.Err(); err != nil {
+			return err
+		}
+		for _, c := range children {
+			if _, seen := visited[c.ID]; seen {
+				continue
+			}
+			visited[c.ID] = struct{}{}
+			result = append(result, c)
+			if err = walk(c.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := walk(failedID); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // -------------------------------------------------------------------
@@ -426,7 +496,7 @@ func (s *Store) Poll(assignedTo string) (*model.Task, error) {
 
 	// Phase 1: collect all candidate tasks (close cursor before deps check).
 	rows, err := s.db.Query(`
-		SELECT id, title, description, status, assigned_to, retry_assigned_to, parent_id, mode,
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by, parent_id, mode,
 		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks
 		WHERE status = 'pending' AND assigned_to = ?
@@ -482,39 +552,72 @@ func (s *Store) DeleteTask(id string) error {
 // -------------------------------------------------------------------
 
 // unlockDependents finds tasks that depend on completedID and, if all their
-// deps are now done, logs them as triggered (they become claimable).
+// deps are now done (or superseded by a done task), logs them as triggered.
+// Also checks tasks that depend on tasks superseded by completedID.
 // Returns the IDs of tasks that were newly unblocked (deps fully met).
 func unlockDependents(tx *sql.Tx, completedID string, now time.Time) ([]string, error) {
-	// Find all tasks that declare completedID as a dependency.
-	rows, err := tx.Query(
-		`SELECT task_id FROM task_deps WHERE depends_on = ?`, completedID)
+	// Collect all candidate task IDs to check.
+	// 1. Tasks that directly depend on completedID.
+	// 2. Tasks that depend on a task superseded by completedID (i.e., the failed original).
+	candidateSet := make(map[string]struct{})
+
+	// Direct dependents.
+	rows, err := tx.Query(`SELECT task_id FROM task_deps WHERE depends_on = ?`, completedID)
 	if err != nil {
 		return nil, fmt.Errorf("find dependents: %w", err)
 	}
-	defer rows.Close()
-
-	var candidates []string
 	for rows.Next() {
 		var tid string
 		if err = rows.Scan(&tid); err != nil {
+			rows.Close() //nolint:errcheck
 			return nil, err
 		}
-		candidates = append(candidates, tid)
+		candidateSet[tid] = struct{}{}
 	}
 	rows.Close() //nolint:errcheck
 
-	var triggered []string
-	for _, cid := range candidates {
-		// Check if ALL deps of cid are done.
-		var unmetCount int
-		err = tx.QueryRow(`
-			SELECT COUNT(*) FROM task_deps td
-			JOIN tasks t ON t.id = td.depends_on
-			WHERE td.task_id = ? AND t.status != 'done'`, cid).Scan(&unmetCount)
-		if err != nil {
-			return nil, fmt.Errorf("check unmet deps for %s: %w", cid, err)
+	// Dependents of tasks that were superseded by completedID (the failed originals).
+	// e.g. A failed, A' (=completedID) supersedes A. B depends on A.
+	// When A' is done, we look: who depends on A? → B.
+	supersededRows, err := tx.Query(
+		`SELECT id FROM tasks WHERE superseded_by = ?`, completedID)
+	if err != nil {
+		return nil, fmt.Errorf("find superseded tasks: %w", err)
+	}
+	var supersededIDs []string
+	for supersededRows.Next() {
+		var sid string
+		if err = supersededRows.Scan(&sid); err != nil {
+			supersededRows.Close() //nolint:errcheck
+			return nil, err
 		}
-		if unmetCount == 0 {
+		supersededIDs = append(supersededIDs, sid)
+	}
+	supersededRows.Close() //nolint:errcheck
+
+	for _, sid := range supersededIDs {
+		depRows, err := tx.Query(`SELECT task_id FROM task_deps WHERE depends_on = ?`, sid)
+		if err != nil {
+			return nil, fmt.Errorf("find dependents of superseded %s: %w", sid, err)
+		}
+		for depRows.Next() {
+			var tid string
+			if err = depRows.Scan(&tid); err != nil {
+				depRows.Close() //nolint:errcheck
+				return nil, err
+			}
+			candidateSet[tid] = struct{}{}
+		}
+		depRows.Close() //nolint:errcheck
+	}
+
+	var triggered []string
+	for cid := range candidateSet {
+		met, err := depsMetForIDTx(tx, cid)
+		if err != nil {
+			return nil, fmt.Errorf("check deps for %s: %w", cid, err)
+		}
+		if met {
 			triggered = append(triggered, cid)
 		}
 	}
@@ -564,12 +667,35 @@ func (s *Store) historyFor(id string) ([]model.HistoryItem, error) {
 
 func (s *Store) depsMetForID(id string) (bool, error) {
 	var unmet int
+	// A dep is "satisfied" if it is done itself, OR its superseder (superseded_by) is done.
+	// We count deps that are NOT satisfied (i.e., unmet).
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM task_deps td
 		JOIN tasks t ON t.id = td.depends_on
-		WHERE td.task_id = ? AND t.status != 'done'`, id).Scan(&unmet)
+		WHERE td.task_id = ?
+		  AND t.status != 'done'
+		  AND (t.superseded_by = '' OR NOT EXISTS (
+		        SELECT 1 FROM tasks s WHERE s.id = t.superseded_by AND s.status = 'done'
+		      ))`, id).Scan(&unmet)
 	if err != nil {
 		return false, fmt.Errorf("deps_met query: %w", err)
+	}
+	return unmet == 0, nil
+}
+
+// depsMetForIDTx is the same as depsMetForID but operates within a transaction.
+func depsMetForIDTx(tx *sql.Tx, id string) (bool, error) {
+	var unmet int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM task_deps td
+		JOIN tasks t ON t.id = td.depends_on
+		WHERE td.task_id = ?
+		  AND t.status != 'done'
+		  AND (t.superseded_by = '' OR NOT EXISTS (
+		        SELECT 1 FROM tasks s WHERE s.id = t.superseded_by AND s.status = 'done'
+		      ))`, id).Scan(&unmet)
+	if err != nil {
+		return false, fmt.Errorf("deps_met query (tx): %w", err)
 	}
 	return unmet == 0, nil
 }
@@ -613,7 +739,7 @@ func scanTaskImpl(r taskScanner) (model.Task, error) {
 	var t model.Task
 	var rr int
 	err := r.Scan(&t.ID, &t.Title, &t.Description, (*string)(&t.Status),
-		&t.AssignedTo, &t.RetryAssignedTo, &t.ParentID, &t.Mode, &rr,
+		&t.AssignedTo, &t.RetryAssignedTo, &t.SupersededBy, &t.ParentID, &t.Mode, &rr,
 		&t.Result, &t.FailureReason, &t.Version, &t.Priority,
 		&t.StartedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {

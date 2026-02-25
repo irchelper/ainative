@@ -3,7 +3,7 @@
 > Status: Draft → v5
 > Owner: 产品经理
 > Date: 2026-02-25
-> Updated: 2026-02-25 (v7 — F11 SessionNotifier 极简消息格式规范；新增 F13 db持久化防误删（AGENT_QUEUE_DB_PATH + Makefile clean规范）；专家汇报 Phase 2 全切说明)
+> Updated: 2026-02-26 (v9 — 新增 F14 失败链路自动恢复：superseded_by 字段 + depsMetForID SQL 扩展 + blocked_downstream 响应字段)
 
 ---
 
@@ -446,6 +446,47 @@ task_id: {id}
 - [ ] `make clean-all` 后 db 才被删除
 - [ ] launchd plist 含 `AGENT_QUEUE_DB_PATH` 绝对路径配置
 
+### F14: 失败链路自动恢复（superseded_by）
+
+| 功能 | 描述 | 优先级 |
+|------|------|--------|
+| `superseded_by` 字段 | tasks 表新增 `superseded_by TEXT NOT NULL DEFAULT ''`，autoRetry 时记录 X.superseded_by = X'.id | P0 |
+| retry 继承原依赖 | autoRetry 创建的 X' 继承 X 的 `depends_on` 列表，链路位置保持一致 | P0 |
+| `depsMetForID` SQL 扩展 | dep 自己 done **OR** dep.superseded_by 对应任务 done → 依赖视为满足 | P0 |
+| `blocked_downstream` 响应字段 | PATCH → failed 时，response 新增 `blocked_downstream` 列表（受影响的下游 pending 任务，只读扫描） | P1 |
+| `failed→pending` 清空约束 | CEO PATCH failed→pending 时必须清空 `superseded_by`，防双重解锁冲突 | P0 |
+
+**用户故事：**
+
+> 作为 CEO，当专家 X 失败且 autoRetry 创建的 X' 完成后，X 的下游任务 B/C 应自动解锁继续执行，无需我手动重建任务链。
+
+**端到端流程（A→B→C，A failed）：**
+
+```
+A PATCH failed, result="原因 | retry_assigned_to: qa"
+  ↓
+Go server autoRetry：
+  1. 创建 A'，depends_on = A.depends_on，assigned_to = "qa"
+  2. A.superseded_by = A'.id
+  3. sessions_send 唤醒 qa
+  ↓
+A' → claim → in_progress → PATCH done
+  ↓
+Go server unlockDependents(A'.id)：
+  - 直接下游：A' 的 depends_on 中的任务（若有）
+  - depsMetForID(B)：B.depends_on 含 A，A.superseded_by = A'.id 且 A' done → 满足 → B 解锁
+  - sessions_send 唤醒 B
+  ↓
+B → poll → claim → 执行 → done → C 解锁 ...
+```
+
+**验收标准：**
+- [ ] 链 A→B→C，A PATCH failed + result 含 `retry_assigned_to: qa` → Go server 自动创建 A'，A.superseded_by = A'.id
+- [ ] A' PATCH done → B 的 `depsMetForID` 返回 true（B 可被 poll 到）
+- [ ] B 被 sessions_send 唤醒（链路从断点恢复，无 CEO 介入）
+- [ ] PATCH failed 响应含 `blocked_downstream` 列表（含 B、C）
+- [ ] CEO PATCH A: failed→pending（人工重试）后，A.superseded_by 被清空
+
 ---
 
 ## 6. 非功能需求
@@ -523,9 +564,9 @@ task_id: {id}
 
 ### 专家集成协议
 
-- [ ] 专家通过 `PATCH /tasks/:id` 报告完成，Go server 自动触发 webhook + 依赖解锁
+- [ ] 专家通过 `PATCH /tasks/:id` 报告完成，Go server 自动触发 webhook + 依赖解锁 + sessions_send 唤醒下游
 - [ ] `GET /tasks?assigned_to=agent_name` 正确返回该 agent 的所有任务
-- [ ] Phase 1 双写模式下，PATCH /tasks 和 sessions_send 均可到达
+- [ ] 专家无需 sessions_send CEO（有 task_id 时），Go server webhook 是唯一通知通道
 
 ### 数据持久化
 
@@ -562,7 +603,7 @@ task_id: {id}
 
 **为什么从 cron 拉改为 webhook 推：**
 - **延迟**：cron 拉取有 1 个轮询周期的固有延迟（3min），webhook 推送秒级触达
-- **复杂度**：cron 拉取需要 `acknowledged_at` 去重机制，webhook 推送是 fire-and-forget，无需状态管理
+- **复杂度**：cron 拉取需要去重机制，webhook 推送是 fire-and-forget，无需状态管理
 - **CEO 依赖**：cron 拉取依赖 CEO 在线，webhook 直接推到 Discord 频道，不依赖任何 agent
 - **平台无关性保留**：Incoming Webhook 是标准 HTTP POST，不是 Discord SDK 绑定；通过 `Notifier` 接口抽象，可换任何平台
 
@@ -604,14 +645,14 @@ task_id: {id}
 - ❌ 不用 `message` tool 向 #首席ceo 发消息汇报进度
 - ❌ 不主动 @CEO（通知由 Go server webhook 自动处理）
 
-### 过渡方案
+### 当前状态：Phase 2（全切）
 
-| 阶段 | 模式 | 说明 |
+专家汇报已全切至 `PATCH /tasks`，sessions_send 仅保留无 task_id 时的兜底 fallback。
+
+| 阶段 | 模式 | 状态 |
 |------|------|------|
-| **Phase 1（双写验证）** | `PATCH /tasks` + `sessions_send` 并行 | 验证 webhook 通知稳定性，CEO 同时通过 webhook 和 sessions_send 收到通知 |
-| **Phase 2（全切）** | 纯 `PATCH /tasks` | 删除 sessions_send 相关代码，所有汇报走 HTTP API |
-
-**Phase 1 → Phase 2 切换条件：** webhook 连续 7 天无漏发（通过 task_history 和 Discord 消息对账验证）。
+| Phase 1 | `PATCH /tasks` + `sessions_send` 双写 | ✅ 历史阶段（已完成过渡） |
+| **Phase 2** | **纯 `PATCH /tasks`** | **✅ 当前状态** |
 
 ---
 
@@ -621,7 +662,7 @@ task_id: {id}
 
 | 维度 | v3（旧） | v4（新） |
 |------|---------|---------|
-| 感知方式 | cron 轮询 `GET /tasks?status=done&unack=true` | webhook 推送被动接收 |
+| 感知方式 | cron 轮询（旧模式，已废弃） | webhook 推送被动接收 + startup GET /tasks/summary |
 | 推进串行链 | CEO 发现 done → 手动派下一步 | Go server F3 自动解锁依赖，agent cron 自行认领 |
 | 通知用户 | CEO 转发 | Go server webhook 直推 Discord |
 | 介入时机 | 每个任务完成都介入 | 仅在 blocked / 超时 / 需人工决策时介入 |
@@ -670,15 +711,16 @@ task_id: {id}
 - **乐观锁**：`version` 字段 + `WHERE version = ?` 原子更新
 - **部署**：单二进制 + launchd（macOS）/ systemd（Linux）KeepAlive
 - **数据位置**：`data/queue.db`（可通过 `--db` 自定义）
-- **代码量预估**：~350 行 Go
+- **代码量（commit 7610e5e）**：handler ~540行 + store ~690行
 
-**v4 schema 字段（tasks 表，在原有基础上）：**
+**当前 schema 字段（tasks 表关键字段）：**
 - `assigned_to VARCHAR` — 任务负责人（agent 名称），claim 时写入，超时释放时清空
+- `retry_assigned_to VARCHAR` — failed 时指定重试 agent
 - `requires_review BOOLEAN DEFAULT false` — 强制 review 路由，见 F4 条件路由
-- ~~`acknowledged_at`~~ — v3 引入，v4 删除（随 CEO cron 拉取模式一起废弃，被 webhook 推送取代）
+- `result VARCHAR` — done 时写摘要，failed 时写失败原因（支持 `原因 | retry_assigned_to: X` 格式）
 
-**v4 新增技术引用：**
-- thinker 架构 re-review：Discord #架构师 msgId `1476180557896613919`
+**技术参考：**
+- thinker 全盘梳理：Discord #架构师 msgId `1476245842980638750`（commit 7610e5e 对齐）
 
 ## 附录 B: 状态流转图
 

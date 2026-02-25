@@ -25,6 +25,7 @@ type Task struct {
 	Status          Status     `json:"status"`
 	AssignedTo      string     `json:"assigned_to,omitempty"`
 	RetryAssignedTo string     `json:"retry_assigned_to,omitempty"`
+	SupersededBy    string     `json:"superseded_by,omitempty"`
 	ParentID        string     `json:"parent_id,omitempty"`
 	Mode            string     `json:"mode,omitempty"`
 	RequiresReview  bool       `json:"requires_review"`
@@ -76,6 +77,13 @@ type PatchTaskRequest struct {
 	Version         int     `json:"version"`
 }
 
+// BlockedDownstream is a compact view of a downstream task blocked by a failed dep.
+type BlockedDownstream struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	AssignedTo string `json:"assigned_to"`
+}
+
 // ClaimRequest is the body for POST /tasks/:id/claim.
 type ClaimRequest struct {
 	Version int    `json:"version"`
@@ -84,8 +92,9 @@ type ClaimRequest struct {
 
 // PatchTaskResponse wraps the updated task with optional triggered IDs.
 type PatchTaskResponse struct {
-	Task      Task     `json:"task"`
-	Triggered []string `json:"triggered,omitempty"`
+	Task               Task                `json:"task"`
+	Triggered          []string            `json:"triggered,omitempty"`
+	BlockedDownstream  []BlockedDownstream `json:"blocked_downstream,omitempty"`
 }
 
 // DepsMet is the response for GET /tasks/:id/deps-met.

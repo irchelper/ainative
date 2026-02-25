@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   status            TEXT NOT NULL DEFAULT 'pending',
   assigned_to       TEXT NOT NULL DEFAULT '',
   retry_assigned_to TEXT NOT NULL DEFAULT '',
+  superseded_by     TEXT NOT NULL DEFAULT '',
   parent_id         TEXT NOT NULL DEFAULT '',
   mode              TEXT NOT NULL DEFAULT '',
   requires_review   INTEGER NOT NULL DEFAULT 0,
@@ -69,6 +70,7 @@ func Open(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN retry_assigned_to TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''`)
 
 	return db, nil
 }

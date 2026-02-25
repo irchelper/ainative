@@ -777,6 +777,162 @@ func patchTaskTo(t *testing.T, srv *httptest.Server, taskID, status string, vers
 }
 
 // -------------------------------------------------------------------
+// V7: superseded_by + deps扩展 — 链路自动恢复
+// -------------------------------------------------------------------
+
+// TestV7_ChainAutoRecovery: 链 A→B→C，A failed，autoRetry 创建 A'
+// A' done 后，B 的 deps_met=true（通过 superseded_by 扩展逻辑）
+func TestV7_ChainAutoRecovery(t *testing.T) {
+	// Mock OpenClaw for autoRetry dispatch.
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	// Create chain A→B→C via dispatch/chain.
+	chainResp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"title": "A-task", "assigned_to": "coder"},
+			{"title": "B-task", "assigned_to": "writer"},
+			{"title": "C-task", "assigned_to": "thinker"},
+		},
+	})
+	if chainResp.StatusCode != http.StatusCreated {
+		t.Fatalf("chain create: expected 201, got %d", chainResp.StatusCode)
+	}
+	var cr model.ChainResponse
+	json.NewDecoder(chainResp.Body).Decode(&cr) //nolint:errcheck
+	chainResp.Body.Close()
+
+	taskA := cr.Tasks[0]
+	taskB := cr.Tasks[1]
+
+	// Before A done/failed: B deps_met should be false.
+	depsResp := getJSON(t, srv, "/tasks/"+taskB.ID+"/deps-met")
+	var dm model.DepsMet
+	json.NewDecoder(depsResp.Body).Decode(&dm) //nolint:errcheck
+	depsResp.Body.Close()
+	if dm.DepsMet {
+		t.Fatal("B should not be deps_met before A done")
+	}
+
+	// Drive A to failed (with retry_assigned_to: coder in result).
+	claimA := postJSON(t, srv, "/tasks/"+taskA.ID+"/claim",
+		map[string]any{"version": taskA.Version, "agent": "coder"})
+	var claimedA model.Task
+	json.NewDecoder(claimA.Body).Decode(&claimedA) //nolint:errcheck
+	claimA.Body.Close()
+
+	ipA := patchTaskTo(t, srv, taskA.ID, "in_progress", claimedA.Version)
+
+	// PATCH A to failed with retry_assigned_to in result → triggers autoRetry.
+	body, _ := json.Marshal(map[string]any{
+		"status":  "failed",
+		"result":  "接口报错 | retry_assigned_to: coder",
+		"version": ipA.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+taskA.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	failResp, _ := http.DefaultClient.Do(req)
+	var failPR struct {
+		Task              model.Task               `json:"task"`
+		BlockedDownstream []model.BlockedDownstream `json:"blocked_downstream"`
+	}
+	json.NewDecoder(failResp.Body).Decode(&failPR) //nolint:errcheck
+	failResp.Body.Close()
+
+	if failPR.Task.Status != model.StatusFailed {
+		t.Fatalf("expected A to be failed, got %s", failPR.Task.Status)
+	}
+
+	// blocked_downstream should include B (and C).
+	if len(failPR.BlockedDownstream) == 0 {
+		t.Error("expected blocked_downstream to be non-empty when A fails")
+	}
+	foundB := false
+	for _, bd := range failPR.BlockedDownstream {
+		if bd.ID == taskB.ID {
+			foundB = true
+		}
+	}
+	if !foundB {
+		t.Errorf("B should be in blocked_downstream, got: %+v", failPR.BlockedDownstream)
+	}
+
+	// Allow autoRetry goroutine to complete.
+	time.Sleep(150 * time.Millisecond)
+
+	// Find the retry task A'.
+	listResp := getJSON(t, srv, "/tasks?assigned_to=coder")
+	var listBody struct {
+		Tasks []model.Task `json:"tasks"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listBody) //nolint:errcheck
+	listResp.Body.Close()
+
+	var taskAPrime *model.Task
+	for i := range listBody.Tasks {
+		if strings.HasPrefix(listBody.Tasks[i].Title, "retry:") {
+			taskAPrime = &listBody.Tasks[i]
+			break
+		}
+	}
+	if taskAPrime == nil {
+		t.Fatal("autoRetry should have created a retry task A'")
+	}
+
+	// Verify A has superseded_by = A'.id
+	aDetail := getJSON(t, srv, "/tasks/"+taskA.ID)
+	var aTask model.Task
+	json.NewDecoder(aDetail.Body).Decode(&aTask) //nolint:errcheck
+	aDetail.Body.Close()
+	if aTask.SupersededBy != taskAPrime.ID {
+		t.Fatalf("A.superseded_by should be A'.id=%q, got %q", taskAPrime.ID, aTask.SupersededBy)
+	}
+
+	// B should still NOT be deps_met (A' is still pending).
+	depsResp2 := getJSON(t, srv, "/tasks/"+taskB.ID+"/deps-met")
+	var dm2 model.DepsMet
+	json.NewDecoder(depsResp2.Body).Decode(&dm2) //nolint:errcheck
+	depsResp2.Body.Close()
+	if dm2.DepsMet {
+		t.Fatal("B should not be deps_met while A' is still pending")
+	}
+
+	// Drive A' to done: claim → in_progress → done.
+	claimAPrime := postJSON(t, srv, "/tasks/"+taskAPrime.ID+"/claim",
+		map[string]any{"version": taskAPrime.Version, "agent": "coder"})
+	var claimedAPrime model.Task
+	json.NewDecoder(claimAPrime.Body).Decode(&claimedAPrime) //nolint:errcheck
+	claimAPrime.Body.Close()
+
+	ipAPrime := patchTaskTo(t, srv, taskAPrime.ID, "in_progress", claimedAPrime.Version)
+	patchTaskTo(t, srv, taskAPrime.ID, "done", ipAPrime.Version)
+
+	// NOW B should be deps_met (A failed but its superseder A' is done).
+	depsResp3 := getJSON(t, srv, "/tasks/"+taskB.ID+"/deps-met")
+	var dm3 model.DepsMet
+	json.NewDecoder(depsResp3.Body).Decode(&dm3) //nolint:errcheck
+	depsResp3.Body.Close()
+	if !dm3.DepsMet {
+		t.Fatal("B should be deps_met after A' (superseder) is done")
+	}
+
+	// Poll as writer should now return B.
+	pollResp := getJSON(t, srv, "/tasks/poll?assigned_to=writer")
+	var pr model.PollResponse
+	json.NewDecoder(pollResp.Body).Decode(&pr) //nolint:errcheck
+	pollResp.Body.Close()
+	if pr.Task == nil || pr.Task.ID != taskB.ID {
+		t.Fatalf("poll for writer should return B after chain recovery, got %v", pr.Task)
+	}
+}
+
+// -------------------------------------------------------------------
 // GET /tasks/poll
 // -------------------------------------------------------------------
 
