@@ -323,6 +323,71 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 // Delete
 // -------------------------------------------------------------------
 
+// Summary returns a compact view of active tasks and done-today count.
+func (s *Store) Summary() (model.SummaryResponse, error) {
+	// Count per-status (all statuses).
+	rows, err := s.db.Query(`
+		SELECT status, COUNT(*) FROM tasks GROUP BY status`)
+	if err != nil {
+		return model.SummaryResponse{}, fmt.Errorf("summary counts: %w", err)
+	}
+	defer rows.Close()
+
+	var resp model.SummaryResponse
+	for rows.Next() {
+		var status string
+		var count int
+		if err = rows.Scan(&status, &count); err != nil {
+			return model.SummaryResponse{}, err
+		}
+		switch model.Status(status) {
+		case model.StatusPending:
+			resp.Pending = count
+		case model.StatusClaimed:
+			resp.Claimed = count
+		case model.StatusInProgress:
+			resp.InProgress = count
+		case model.StatusReview:
+			resp.Review = count
+		case model.StatusBlocked:
+			resp.Blocked = count
+		}
+	}
+	rows.Close() //nolint:errcheck
+
+	// Done today: tasks done since the start of today (UTC).
+	// We compare against midnight UTC using substr to handle Go's RFC3339 format.
+	todayStart := time.Now().UTC().Truncate(24 * time.Hour)
+	err = s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE status = 'done' AND updated_at >= ?`, todayStart).Scan(&resp.DoneToday)
+	if err != nil {
+		return model.SummaryResponse{}, fmt.Errorf("done_today count: %w", err)
+	}
+
+	// Active tasks list (non-done, non-cancelled), sorted by updated_at DESC.
+	taskRows, err := s.db.Query(`
+		SELECT id, title, status, assigned_to, updated_at FROM tasks
+		WHERE status NOT IN ('done', 'cancelled')
+		ORDER BY updated_at DESC`)
+	if err != nil {
+		return model.SummaryResponse{}, fmt.Errorf("active tasks: %w", err)
+	}
+	defer taskRows.Close()
+
+	for taskRows.Next() {
+		var t model.SummaryTask
+		if err = taskRows.Scan(&t.ID, &t.Title, (*string)(&t.Status), &t.AssignedTo, &t.UpdatedAt); err != nil {
+			return model.SummaryResponse{}, err
+		}
+		resp.Tasks = append(resp.Tasks, t)
+	}
+	if resp.Tasks == nil {
+		resp.Tasks = []model.SummaryTask{}
+	}
+	return resp, taskRows.Err()
+}
+
 // DeleteTask removes a task (cascade deletes deps + history).
 func (s *Store) DeleteTask(id string) error {
 	res, err := s.db.Exec(`DELETE FROM tasks WHERE id = ?`, id)

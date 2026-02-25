@@ -96,3 +96,41 @@ type HealthResponse struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
+
+// DispatchRequest is the body for POST /dispatch.
+type DispatchRequest struct {
+	Title          string   `json:"title"`
+	AssignedTo     string   `json:"assigned_to"`
+	Description    string   `json:"description"`
+	RequiresReview bool     `json:"requires_review"`
+	DependsOn      []string `json:"depends_on"`
+	Result         string   `json:"result"`
+}
+
+// DispatchResponse wraps the created task and a flag indicating whether the
+// sessions_send notification was sent successfully.
+type DispatchResponse struct {
+	Task         Task   `json:"task"`
+	Notified     bool   `json:"notified"`
+	NotifyError  string `json:"notify_error,omitempty"`
+}
+
+// SummaryTask is a compact task view used in GET /tasks/summary.
+type SummaryTask struct {
+	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	Status     Status    `json:"status"`
+	AssignedTo string    `json:"assigned_to,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// SummaryResponse is returned by GET /tasks/summary.
+type SummaryResponse struct {
+	Pending    int           `json:"pending"`
+	Claimed    int           `json:"claimed"`
+	InProgress int           `json:"in_progress"`
+	Review     int           `json:"review"`
+	Blocked    int           `json:"blocked"`
+	DoneToday  int           `json:"done_today"`
+	Tasks      []SummaryTask `json:"tasks"`
+}

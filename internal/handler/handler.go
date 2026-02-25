@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/irchelper/agent-queue/internal/model"
 	"github.com/irchelper/agent-queue/internal/notify"
+	"github.com/irchelper/agent-queue/internal/openclaw"
 	"github.com/irchelper/agent-queue/internal/store"
 )
 
@@ -18,17 +20,19 @@ import (
 type Handler struct {
 	store    *store.Store
 	notifier notify.Notifier
+	oc       *openclaw.Client
 	db       *sql.DB
 }
 
 // New creates a Handler and registers all routes on mux.
-func New(db *sql.DB, s *store.Store, n notify.Notifier) *Handler {
-	return &Handler{store: s, notifier: n, db: db}
+func New(db *sql.DB, s *store.Store, n notify.Notifier, oc *openclaw.Client) *Handler {
+	return &Handler{store: s, notifier: n, oc: oc, db: db}
 }
 
 // Register wires up all routes on mux.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.handleHealth)
+	mux.HandleFunc("/dispatch", h.handleDispatch)
 	mux.HandleFunc("/tasks", h.handleTasks)
 	mux.HandleFunc("/tasks/", h.handleTasksID)
 }
@@ -47,6 +51,66 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		dbStatus = "error: " + err.Error()
 	}
 	writeJSON(w, http.StatusOK, model.HealthResponse{Status: "ok", Database: dbStatus})
+}
+
+// -------------------------------------------------------------------
+// -------------------------------------------------------------------
+// POST /dispatch
+// -------------------------------------------------------------------
+
+func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req model.DispatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		writeError(w, http.StatusBadRequest, "title is required")
+		return
+	}
+	if strings.TrimSpace(req.AssignedTo) == "" {
+		writeError(w, http.StatusBadRequest, "assigned_to is required")
+		return
+	}
+
+	// Create task.
+	task, err := h.store.CreateTask(model.CreateTaskRequest{
+		Title:          req.Title,
+		Description:    req.Description,
+		AssignedTo:     req.AssignedTo,
+		RequiresReview: req.RequiresReview,
+		DependsOn:      req.DependsOn,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Notify expert via sessions_send (fire-and-forget; failure does not
+	// affect the HTTP response for task creation).
+	resp := model.DispatchResponse{Task: task}
+
+	sessionKey, known := openclaw.SessionKey(req.AssignedTo)
+	if !known {
+		resp.NotifyError = fmt.Sprintf("unknown agent %q – task created but no session_send sent", req.AssignedTo)
+		log.Printf("[dispatch] unknown agent %q – skipping sessions_send", req.AssignedTo)
+	} else if h.oc != nil {
+		msg := fmt.Sprintf("[agent-queue] 新任务派发：%s\ntask_id: %s\n\n请通过 POST /tasks/%s/claim 认领后执行。",
+			task.Title, task.ID, task.ID)
+		if err = h.oc.SendToSession(sessionKey, msg); err != nil {
+			resp.NotifyError = err.Error()
+			log.Printf("[dispatch] sessions_send to %s failed: %v", sessionKey, err)
+		} else {
+			resp.Notified = true
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 // -------------------------------------------------------------------
@@ -111,6 +175,16 @@ func (h *Handler) handleTasksID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/tasks/")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "missing task id")
+		return
+	}
+
+	// Special static sub-path: /tasks/summary
+	if path == "summary" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.tasksSummary(w, r)
 		return
 	}
 
@@ -219,6 +293,16 @@ func (h *Handler) claimTask(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// GET /tasks/summary
+func (h *Handler) tasksSummary(w http.ResponseWriter, _ *http.Request) {
+	summary, err := h.store.Summary()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // F3

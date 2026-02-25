@@ -14,6 +14,7 @@ import (
 	"github.com/irchelper/agent-queue/internal/db"
 	"github.com/irchelper/agent-queue/internal/handler"
 	"github.com/irchelper/agent-queue/internal/notify"
+	"github.com/irchelper/agent-queue/internal/openclaw"
 	"github.com/irchelper/agent-queue/internal/store"
 )
 
@@ -39,7 +40,8 @@ func main() {
 	// Build dependencies.
 	s := store.New(database)
 	n := notify.NewFromEnv()
-	h := handler.New(database, s, n)
+	oc := openclaw.NewFromEnv()
+	h := handler.New(database, s, n, oc)
 
 	mux := http.NewServeMux()
 	h.Register(mux)
