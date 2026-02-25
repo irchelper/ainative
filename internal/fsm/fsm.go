@@ -19,26 +19,21 @@ var validTransitions = map[model.Status]map[model.Status]bool{
 		model.StatusPending:    true, // release
 	},
 	model.StatusInProgress: {
-		model.StatusReview:    true,
-		model.StatusDone:      true,
-		model.StatusBlocked:   true,
-		model.StatusFailed:    true, // execution error
-		model.StatusPending:   true, // timeout/release
-		model.StatusCancelled: false,
+		model.StatusReview:  true,
+		model.StatusDone:    true,
+		model.StatusBlocked: true,
+		model.StatusFailed:  true, // execution error – terminal
+		model.StatusPending: true, // timeout/release
 	},
 	model.StatusReview: {
 		model.StatusDone:       true,
 		model.StatusInProgress: true, // revise/send back
-		model.StatusFailed:     true, // review finds critical failure
 	},
 	model.StatusBlocked: {
 		model.StatusPending:    true, // unblock
 		model.StatusInProgress: true, // direct resume
 	},
-	// failed → pending: retry (assigned_to set from retry_assigned_to if present)
-	model.StatusFailed: {
-		model.StatusPending: true,
-	},
+	model.StatusFailed:    {}, // terminal – retry via new task, not state transition
 	model.StatusDone:      {}, // terminal
 	model.StatusCancelled: {}, // terminal
 }

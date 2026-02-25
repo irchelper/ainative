@@ -41,15 +41,9 @@ func main() {
 	s := store.New(database)
 	oc := openclaw.NewFromEnv()
 
-	// Build notifier: Discord webhook (if configured) + SessionNotifier to CEO
-	// session (if AGENT_QUEUE_CEO_SESSION_KEY is set).
-	discordNotifier := notify.NewFromEnv()
-	var n notify.Notifier = discordNotifier
-	if ceoKey := os.Getenv("AGENT_QUEUE_CEO_SESSION_KEY"); ceoKey != "" {
-		n = notify.NewMultiNotifier(discordNotifier, notify.NewSessionNotifier(oc, ceoKey))
-		log.Printf("SessionNotifier enabled → %s", ceoKey)
-	}
-
+	// Build notifier: Discord webhook if configured.
+	// SessionNotifier (CEO alerts on unhandled failures) is wired inside handler.New.
+	n := notify.NewFromEnv()
 	h := handler.New(database, s, n, oc)
 
 	mux := http.NewServeMux()

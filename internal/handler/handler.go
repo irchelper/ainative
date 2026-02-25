@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/irchelper/agent-queue/internal/failparser"
 	"github.com/irchelper/agent-queue/internal/model"
 	"github.com/irchelper/agent-queue/internal/notify"
 	"github.com/irchelper/agent-queue/internal/openclaw"
@@ -19,15 +20,26 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	store    *store.Store
-	notifier notify.Notifier
-	oc       *openclaw.Client
-	db       *sql.DB
+	store     *store.Store
+	notifier  notify.Notifier
+	sessionN  *notify.SessionNotifier // CEO alert for unhandled failures
+	oc        *openclaw.Client
+	db        *sql.DB
 }
 
 // New creates a Handler and registers all routes on mux.
 func New(db *sql.DB, s *store.Store, n notify.Notifier, oc *openclaw.Client) *Handler {
-	return &Handler{store: s, notifier: n, oc: oc, db: db}
+	var sn *notify.SessionNotifier
+	if oc != nil {
+		sn = notify.NewSessionNotifier(oc, "")
+	}
+	return &Handler{
+		store:    s,
+		notifier: n,
+		sessionN: sn,
+		oc:       oc,
+		db:       db,
+	}
 }
 
 // Register wires up all routes on mux.
@@ -344,12 +356,71 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// F6: async notification on done or failed.
-	if task.Status == model.StatusDone || task.Status == model.StatusFailed {
+	// F6: async webhook on done.
+	if task.Status == model.StatusDone {
 		notify.AsyncNotify(h.notifier, task)
 	}
 
+	// On failed: parse result for retry_assigned_to directive.
+	// Has directive → create retry task + dispatch to agent.
+	// No directive  → notify CEO via SessionNotifier (human intervention needed).
+	if task.Status == model.StatusFailed {
+		h.handleFailedTask(task)
+	}
+
 	writeJSON(w, http.StatusOK, model.PatchTaskResponse{Task: task, Triggered: triggered})
+}
+
+// handleFailedTask is called asynchronously when a task transitions to failed.
+// It parses the result field for a retry directive and either:
+//   - creates a new retry task + dispatches to the specified agent, or
+//   - notifies the CEO session for human intervention.
+func (h *Handler) handleFailedTask(task model.Task) {
+	go func() {
+		retryAgent, hasRetry := failparser.ParseRetryAgent(task.Result)
+		if hasRetry {
+			h.autoRetry(task, retryAgent)
+		} else {
+			if h.sessionN != nil {
+				if err := h.sessionN.OnFailed(task); err != nil {
+					log.Printf("[handler] CEO notification failed for task %s: %v", task.ID, err)
+				}
+			}
+		}
+	}()
+}
+
+// autoRetry creates a new task for the retry agent and dispatches it.
+func (h *Handler) autoRetry(original model.Task, retryAgent string) {
+	newTask, err := h.store.CreateTask(model.CreateTaskRequest{
+		Title:       "retry: " + original.Title,
+		AssignedTo:  retryAgent,
+		Priority:    original.Priority,
+		Description: "failed原因: " + original.Result,
+	})
+	if err != nil {
+		log.Printf("[handler] autoRetry CreateTask failed for original %s: %v", original.ID, err)
+		return
+	}
+	log.Printf("[handler] autoRetry: created task %s for agent %s (original: %s)",
+		newTask.ID, retryAgent, original.ID)
+
+	// Dispatch without notifying CEO (per spec: "不通知 CEO").
+	sessionKey, known := openclaw.SessionKey(retryAgent)
+	if !known {
+		log.Printf("[handler] autoRetry: unknown agent %q – task %s created but not dispatched", retryAgent, newTask.ID)
+		return
+	}
+	if h.oc == nil {
+		return
+	}
+	msg := fmt.Sprintf("[agent-queue] 新任务派发：%s\ntask_id: %s\n\n请通过 POST /tasks/%s/claim 认领后执行。",
+		newTask.Title, newTask.ID, newTask.ID)
+	if err := h.oc.SendToSession(sessionKey, msg); err != nil {
+		log.Printf("[handler] autoRetry dispatch to %s failed: %v", sessionKey, err)
+	} else {
+		log.Printf("[handler] autoRetry dispatched task %s to %s", newTask.ID, retryAgent)
+	}
 }
 
 func (h *Handler) deleteTask(w http.ResponseWriter, _ *http.Request, id string) {

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/irchelper/agent-queue/internal/db"
 	"github.com/irchelper/agent-queue/internal/handler"
@@ -505,15 +507,14 @@ func TestDispatchChain_AutoUnlock_SecondTaskAfterFirstDone(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
-// failed 状态 + retry_assigned_to
+// failed 状态（终态）+ autoRetry + SessionNotifier
 // -------------------------------------------------------------------
 
-func TestFailed_InProgressToFailed(t *testing.T) {
-	srv := newTestServer(t, nil)
-	defer srv.Close()
-
+// driveToFailed creates a task, claims it, moves it to in_progress, then failed.
+func driveToFailed(t *testing.T, srv *httptest.Server, title, result string) model.Task {
+	t.Helper()
 	var task model.Task
-	r := postJSON(t, srv, "/tasks", map[string]any{"title": "fail-me", "assigned_to": "coder"})
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": title, "assigned_to": "coder"})
 	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
 	r.Body.Close()
 
@@ -524,84 +525,39 @@ func TestFailed_InProgressToFailed(t *testing.T) {
 	claimR.Body.Close()
 
 	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
-	failed := patchTaskTo(t, srv, task.ID, "failed", ipTask.Version)
 
-	if failed.Status != model.StatusFailed {
-		t.Fatalf("expected failed, got %s", failed.Status)
-	}
-}
-
-func TestFailed_RetryAssignedTo_SetViaRetry(t *testing.T) {
-	srv := newTestServer(t, nil)
-	defer srv.Close()
-
-	// Create task with retry_assigned_to.
-	var task model.Task
-	r := postJSON(t, srv, "/tasks", map[string]any{
-		"title":             "retry-task",
-		"assigned_to":       "coder",
-		"retry_assigned_to": "thinker",
-	})
-	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
-	r.Body.Close()
-	if task.RetryAssignedTo != "thinker" {
-		t.Fatalf("retry_assigned_to not saved: got %q", task.RetryAssignedTo)
-	}
-
-	// Drive to failed.
-	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
-		map[string]any{"version": task.Version, "agent": "coder"})
-	var claimed model.Task
-	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
-	claimR.Body.Close()
-
-	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
-	failedTask := patchTaskTo(t, srv, task.ID, "failed", ipTask.Version)
-	if failedTask.Status != model.StatusFailed {
-		t.Fatalf("expected failed, got %s", failedTask.Status)
-	}
-
-	// Retry: failed → pending should apply retry_assigned_to.
-	retried := patchTaskTo(t, srv, task.ID, "pending", failedTask.Version)
-	if retried.Status != model.StatusPending {
-		t.Fatalf("expected pending after retry, got %s", retried.Status)
-	}
-	if retried.AssignedTo != "thinker" {
-		t.Fatalf("expected assigned_to=thinker after retry, got %q", retried.AssignedTo)
-	}
-	// retry_assigned_to should be cleared after use.
-	if retried.RetryAssignedTo != "" {
-		t.Fatalf("retry_assigned_to should be cleared after retry, got %q", retried.RetryAssignedTo)
-	}
-}
-
-func TestFailed_SetRetryAssignedToViaPatch(t *testing.T) {
-	srv := newTestServer(t, nil)
-	defer srv.Close()
-
-	var task model.Task
-	r := postJSON(t, srv, "/tasks", map[string]any{"title": "t", "assigned_to": "coder"})
-	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
-	r.Body.Close()
-
-	// Set retry_assigned_to via PATCH (before failing).
-	body, _ := json.Marshal(map[string]any{
-		"retry_assigned_to": "writer",
-		"version":           task.Version,
-	})
+	body, _ := json.Marshal(map[string]any{"status": "failed", "result": result, "version": ipTask.Version})
 	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var pr struct{ Task model.Task }
 	json.NewDecoder(resp.Body).Decode(&pr) //nolint:errcheck
 	resp.Body.Close()
+	return pr.Task
+}
 
-	if pr.Task.RetryAssignedTo != "writer" {
-		t.Fatalf("retry_assigned_to via PATCH: got %q", pr.Task.RetryAssignedTo)
+func TestFailed_IsTerminal_CannotTransitionOut(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	failed := driveToFailed(t, srv, "fail-me", "no retry")
+
+	if failed.Status != model.StatusFailed {
+		t.Fatalf("expected failed, got %s", failed.Status)
+	}
+
+	// failed → pending should be 422 (terminal state).
+	body, _ := json.Marshal(map[string]any{"status": "pending", "version": failed.Version})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+failed.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for failed→pending, got %d", resp.StatusCode)
 	}
 }
 
-func TestFailed_InvalidTransition_DoneToFailed_Returns422(t *testing.T) {
+func TestFailed_DoneToFailed_Returns422(t *testing.T) {
 	srv := newTestServer(t, nil)
 	defer srv.Close()
 
@@ -619,39 +575,110 @@ func TestFailed_InvalidTransition_DoneToFailed_Returns422(t *testing.T) {
 	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
 	doneTask := patchTaskTo(t, srv, task.ID, "done", ipTask.Version)
 
-	// done → failed should be 422.
 	body, _ := json.Marshal(map[string]any{"status": "failed", "version": doneTask.Version})
 	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", resp.StatusCode)
+		t.Fatalf("expected 422 for done→failed, got %d", resp.StatusCode)
 	}
 }
 
-func TestFailed_WithoutRetryAssignedTo_PendingClearsAssignedTo(t *testing.T) {
-	srv := newTestServer(t, nil)
+func TestFailed_AutoRetry_CreatesNewTask(t *testing.T) {
+	// Mock OpenClaw to capture sessions_send.
+	var dispatched []map[string]any
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		dispatched = append(dispatched, body)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
 	defer srv.Close()
 
-	var task model.Task
-	r := postJSON(t, srv, "/tasks", map[string]any{"title": "t", "assigned_to": "coder"})
-	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
-	r.Body.Close()
+	// Fail with retry_assigned_to in result.
+	driveToFailed(t, srv, "登录实现", "登录按钮无响应 | retry_assigned_to: coder")
 
-	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
-		map[string]any{"version": task.Version, "agent": "coder"})
-	var claimed model.Task
-	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
-	claimR.Body.Close()
+	// Allow goroutine to complete.
+	time.Sleep(100 * time.Millisecond)
 
-	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
-	failedTask := patchTaskTo(t, srv, task.ID, "failed", ipTask.Version)
-	retried := patchTaskTo(t, srv, task.ID, "pending", failedTask.Version)
+	// Verify a retry task was created.
+	listResp := getJSON(t, srv, "/tasks?assigned_to=coder")
+	var listBody struct {
+		Tasks []model.Task `json:"tasks"`
+		Count int          `json:"count"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listBody) //nolint:errcheck
+	listResp.Body.Close()
 
-	// No retry_assigned_to set → assigned_to should be cleared.
-	if retried.AssignedTo != "" {
-		t.Fatalf("expected assigned_to cleared, got %q", retried.AssignedTo)
+	var retryTask *model.Task
+	for i := range listBody.Tasks {
+		if strings.HasPrefix(listBody.Tasks[i].Title, "retry:") {
+			retryTask = &listBody.Tasks[i]
+			break
+		}
+	}
+	if retryTask == nil {
+		t.Fatal("expected a 'retry: ...' task to be created")
+	}
+	if retryTask.AssignedTo != "coder" {
+		t.Fatalf("retry task assigned_to: want coder, got %q", retryTask.AssignedTo)
+	}
+	if !strings.Contains(retryTask.Description, "failed原因:") {
+		t.Errorf("retry task description should contain original failure: %q", retryTask.Description)
+	}
+}
+
+func TestFailed_NoRetryDirective_NoNewTask(t *testing.T) {
+	// Mock CEO session notifier capture.
+	var ceoMessages []string
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if args, ok := body["args"].(map[string]any); ok {
+			if msg, ok := args["message"].(string); ok {
+				ceoMessages = append(ceoMessages, msg)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	driveToFailed(t, srv, "重要任务", "完全崩溃，没有重试方案")
+
+	time.Sleep(100 * time.Millisecond)
+
+	// No new task should be created.
+	listResp := getJSON(t, srv, "/tasks?assigned_to=coder")
+	var listBody struct {
+		Tasks []model.Task `json:"tasks"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listBody) //nolint:errcheck
+	listResp.Body.Close()
+
+	for _, t2 := range listBody.Tasks {
+		if strings.HasPrefix(t2.Title, "retry:") {
+			t.Fatal("no retry task should be created when no retry_assigned_to directive")
+		}
+	}
+
+	// CEO should have been notified.
+	found := false
+	for _, msg := range ceoMessages {
+		if strings.Contains(msg, "⚠️") && strings.Contains(msg, "重要任务") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("CEO should have received ⚠️ alert for failed task, got: %v", ceoMessages)
 	}
 }
 

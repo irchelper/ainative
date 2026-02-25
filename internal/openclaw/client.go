@@ -28,6 +28,10 @@ var agentSessionKeys = map[string]string{
 	"devops":   "agent:devops:discord:channel:1475339626872049736",
 	"security": "agent:security:discord:channel:1475339809206697984",
 	"ops":      "agent:ops:discord:channel:1475339864361664684",
+	"qa":       "agent:qa:discord:channel:1475679634442944532",
+	"pm":       "agent:pm:discord:channel:1476150796071600242",
+	"uiux":     "agent:uiux:discord:channel:1476150914216886395",
+	"vision":   "agent:vision:discord:channel:1475680076380110969",
 }
 
 // SessionKey returns the session key for the given agent name.

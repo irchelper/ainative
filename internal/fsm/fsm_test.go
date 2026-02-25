@@ -25,10 +25,8 @@ func TestValidate_AllowedTransitions(t *testing.T) {
 		{"in_progress→pending(timeout)", model.StatusInProgress, model.StatusPending, false},
 		{"review→done", model.StatusReview, model.StatusDone, true},
 		{"review→in_progress(revise)", model.StatusReview, model.StatusInProgress, true},
-		{"review→failed", model.StatusReview, model.StatusFailed, true},
 		{"blocked→pending", model.StatusBlocked, model.StatusPending, false},
 		{"blocked→in_progress", model.StatusBlocked, model.StatusInProgress, false},
-		{"failed→pending(retry)", model.StatusFailed, model.StatusPending, false},
 	}
 
 	for _, tc := range cases {
@@ -51,12 +49,13 @@ func TestValidate_ForbiddenTransitions(t *testing.T) {
 		{"done→in_progress (terminal)", model.StatusDone, model.StatusInProgress, false},
 		{"done→failed (terminal)", model.StatusDone, model.StatusFailed, false},
 		{"cancelled→pending (terminal)", model.StatusCancelled, model.StatusPending, false},
+		{"failed→pending (terminal)", model.StatusFailed, model.StatusPending, false},
+		{"failed→in_progress (terminal)", model.StatusFailed, model.StatusInProgress, false},
+		{"failed→done (terminal)", model.StatusFailed, model.StatusDone, false},
 		{"pending→in_progress (skip claimed)", model.StatusPending, model.StatusInProgress, false},
 		{"pending→done (skip all)", model.StatusPending, model.StatusDone, false},
 		{"in_progress→done when requires_review=true", model.StatusInProgress, model.StatusDone, true},
 		{"in_progress→review when requires_review=false", model.StatusInProgress, model.StatusReview, false},
-		{"failed→in_progress (must go through pending)", model.StatusFailed, model.StatusInProgress, false},
-		{"failed→done (must go through pending)", model.StatusFailed, model.StatusDone, false},
 	}
 
 	for _, tc := range cases {
