@@ -14,6 +14,7 @@ const (
 	StatusDone       Status = "done"
 	StatusBlocked    Status = "blocked"
 	StatusCancelled  Status = "cancelled"
+	StatusFailed     Status = "failed" // task execution error; may retry via failed→pending
 )
 
 // Task is the primary entity managed by agent-queue.
@@ -28,10 +29,11 @@ type Task struct {
 	RequiresReview bool       `json:"requires_review"`
 	Result         string     `json:"result,omitempty"`
 	Version        int        `json:"version"`
-	Priority       int        `json:"priority"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	Priority          int        `json:"priority"`
+	RetryAssignedTo   string     `json:"retry_assigned_to,omitempty"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 
 	// Populated by detail queries.
 	DependsOn []string      `json:"depends_on,omitempty"`
@@ -51,23 +53,25 @@ type HistoryItem struct {
 
 // CreateTaskRequest is the body for POST /tasks.
 type CreateTaskRequest struct {
-	Title          string   `json:"title"`
-	Description    string   `json:"description"`
-	AssignedTo     string   `json:"assigned_to"`
-	ParentID       string   `json:"parent_id"`
-	Mode           string   `json:"mode"`
-	RequiresReview bool     `json:"requires_review"`
-	Priority       int      `json:"priority"`
-	DependsOn      []string `json:"depends_on"`
+	Title             string   `json:"title"`
+	Description       string   `json:"description"`
+	AssignedTo        string   `json:"assigned_to"`
+	ParentID          string   `json:"parent_id"`
+	Mode              string   `json:"mode"`
+	RequiresReview    bool     `json:"requires_review"`
+	Priority          int      `json:"priority"`
+	RetryAssignedTo   string   `json:"retry_assigned_to"`
+	DependsOn         []string `json:"depends_on"`
 }
 
 // PatchTaskRequest is the body for PATCH /tasks/:id.
 type PatchTaskRequest struct {
-	Status    *Status `json:"status"`
-	Result    *string `json:"result"`
-	Note      string  `json:"note"`
-	ChangedBy string  `json:"changed_by"`
-	Version   int     `json:"version"`
+	Status          *Status `json:"status"`
+	Result          *string `json:"result"`
+	Note            string  `json:"note"`
+	ChangedBy       string  `json:"changed_by"`
+	Version         int     `json:"version"`
+	RetryAssignedTo *string `json:"retry_assigned_to"` // set/update retry agent; applied immediately
 }
 
 // ClaimRequest is the body for POST /tasks/:id/claim.
@@ -169,6 +173,7 @@ type SummaryResponse struct {
 	InProgress int           `json:"in_progress"`
 	Review     int           `json:"review"`
 	Blocked    int           `json:"blocked"`
+	Failed     int           `json:"failed"`
 	DoneToday  int           `json:"done_today"`
 	Tasks      []SummaryTask `json:"tasks"`
 }

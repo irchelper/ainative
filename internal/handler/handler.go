@@ -344,8 +344,8 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// F6: async webhook on done.
-	if task.Status == model.StatusDone {
+	// F6: async notification on done or failed.
+	if task.Status == model.StatusDone || task.Status == model.StatusFailed {
 		notify.AsyncNotify(h.notifier, task)
 	}
 
