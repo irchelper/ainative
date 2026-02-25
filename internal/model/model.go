@@ -28,6 +28,7 @@ type Task struct {
 	RequiresReview bool       `json:"requires_review"`
 	Result         string     `json:"result,omitempty"`
 	Version        int        `json:"version"`
+	Priority       int        `json:"priority"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -56,6 +57,7 @@ type CreateTaskRequest struct {
 	ParentID       string   `json:"parent_id"`
 	Mode           string   `json:"mode"`
 	RequiresReview bool     `json:"requires_review"`
+	Priority       int      `json:"priority"`
 	DependsOn      []string `json:"depends_on"`
 }
 
@@ -113,6 +115,42 @@ type DispatchResponse struct {
 	Task         Task   `json:"task"`
 	Notified     bool   `json:"notified"`
 	NotifyError  string `json:"notify_error,omitempty"`
+}
+
+// -------------------------------------------------------------------
+// F9: POST /dispatch/chain
+// -------------------------------------------------------------------
+
+// ChainTaskSpec is one task entry in a chain submission.
+type ChainTaskSpec struct {
+	Title          string `json:"title"`
+	AssignedTo     string `json:"assigned_to"`
+	Description    string `json:"description"`
+	RequiresReview bool   `json:"requires_review"`
+	Priority       int    `json:"priority"`
+}
+
+// ChainRequest is the body for POST /dispatch/chain.
+type ChainRequest struct {
+	Tasks []ChainTaskSpec `json:"tasks"`
+}
+
+// ChainResponse is returned by POST /dispatch/chain.
+type ChainResponse struct {
+	ChainID         string `json:"chain_id"`
+	Tasks           []Task `json:"tasks"`
+	FirstDispatched string `json:"first_dispatched"`
+	Notified        bool   `json:"notified"`
+	NotifyError     string `json:"notify_error,omitempty"`
+}
+
+// -------------------------------------------------------------------
+// F10: GET /tasks/poll
+// -------------------------------------------------------------------
+
+// PollResponse is returned by GET /tasks/poll.
+type PollResponse struct {
+	Task *Task `json:"task"` // nil when no eligible task found
 }
 
 // SummaryTask is a compact task view used in GET /tasks/summary.

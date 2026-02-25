@@ -35,10 +35,10 @@ func (s *Store) CreateTask(req model.CreateTaskRequest) (model.Task, error) {
 
 	_, err = tx.Exec(`
 		INSERT INTO tasks (id, title, description, status, assigned_to, parent_id, mode,
-		                   requires_review, version, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, 1, ?, ?)`,
+		                   requires_review, priority, version, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, 1, ?, ?)`,
 		id, req.Title, req.Description, req.AssignedTo,
-		req.ParentID, req.Mode, boolToInt(req.RequiresReview),
+		req.ParentID, req.Mode, boolToInt(req.RequiresReview), req.Priority,
 		now, now)
 	if err != nil {
 		return model.Task{}, fmt.Errorf("insert task: %w", err)
@@ -90,7 +90,7 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 	}
 
 	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.parent_id,
-	                 t.mode, t.requires_review, t.result, t.version, t.started_at, t.created_at, t.updated_at
+	                 t.mode, t.requires_review, t.result, t.version, t.priority, t.started_at, t.created_at, t.updated_at
 	          FROM tasks t
 	          WHERE ` + strings.Join(where, " AND ") + `
 	          ORDER BY t.created_at ASC`
@@ -138,7 +138,7 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 func (s *Store) GetByID(id string) (model.Task, error) {
 	row := s.db.QueryRow(`
 		SELECT id, title, description, status, assigned_to, parent_id,
-		       mode, requires_review, result, version, started_at, created_at, updated_at
+		       mode, requires_review, result, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTaskRow(row)
@@ -237,7 +237,7 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 	// Fetch current task inside the transaction.
 	row := tx.QueryRow(`
 		SELECT id, title, description, status, assigned_to, parent_id,
-		       mode, requires_review, result, version, started_at, created_at, updated_at
+		       mode, requires_review, result, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	current, err := scanTaskRow(row)
@@ -386,6 +386,57 @@ func (s *Store) Summary() (model.SummaryResponse, error) {
 		resp.Tasks = []model.SummaryTask{}
 	}
 	return resp, taskRows.Err()
+}
+
+// Poll returns at most one pending, deps-met task for the given agent,
+// sorted by priority DESC, created_at ASC (highest priority, oldest first).
+// Returns (nil, nil) when no eligible task is found.
+//
+// NOTE: We close the rows cursor before calling depsMetForID to avoid a
+// deadlock on SQLite's single-connection pool (MaxOpenConns=1).
+func (s *Store) Poll(assignedTo string) (*model.Task, error) {
+	if assignedTo == "" {
+		return nil, fmt.Errorf("assigned_to is required")
+	}
+
+	// Phase 1: collect all candidate tasks (close cursor before deps check).
+	rows, err := s.db.Query(`
+		SELECT id, title, description, status, assigned_to, parent_id, mode,
+		       requires_review, result, version, priority, started_at, created_at, updated_at
+		FROM tasks
+		WHERE status = 'pending' AND assigned_to = ?
+		ORDER BY priority DESC, created_at ASC
+		LIMIT 20`, assignedTo)
+	if err != nil {
+		return nil, fmt.Errorf("poll query: %w", err)
+	}
+
+	var candidates []model.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, err
+		}
+		candidates = append(candidates, t)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close() //nolint:errcheck
+		return nil, err
+	}
+	rows.Close() //nolint:errcheck
+
+	// Phase 2: find the first task with all deps met (connection now free).
+	for i := range candidates {
+		met, err := s.depsMetForID(candidates[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		if met {
+			return &candidates[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // DeleteTask removes a task (cascade deletes deps + history).
@@ -538,7 +589,7 @@ func scanTaskImpl(r taskScanner) (model.Task, error) {
 	var rr int
 	err := r.Scan(&t.ID, &t.Title, &t.Description, (*string)(&t.Status),
 		&t.AssignedTo, &t.ParentID, &t.Mode, &rr,
-		&t.Result, &t.Version, &t.StartedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.Result, &t.Version, &t.Priority, &t.StartedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return model.Task{}, err
 	}

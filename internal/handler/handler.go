@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/irchelper/agent-queue/internal/model"
 	"github.com/irchelper/agent-queue/internal/notify"
@@ -33,6 +34,7 @@ func New(db *sql.DB, s *store.Store, n notify.Notifier, oc *openclaw.Client) *Ha
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.handleHealth)
 	mux.HandleFunc("/dispatch", h.handleDispatch)
+	mux.HandleFunc("/dispatch/chain", h.handleDispatchChain)
 	mux.HandleFunc("/tasks", h.handleTasks)
 	mux.HandleFunc("/tasks/", h.handleTasksID)
 }
@@ -114,6 +116,85 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // -------------------------------------------------------------------
+// POST /dispatch/chain
+// -------------------------------------------------------------------
+
+func (h *Handler) handleDispatchChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req model.ChainRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if len(req.Tasks) == 0 {
+		writeError(w, http.StatusBadRequest, "tasks must be non-empty")
+		return
+	}
+	for i, t := range req.Tasks {
+		if strings.TrimSpace(t.Title) == "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("tasks[%d].title is required", i))
+			return
+		}
+		if strings.TrimSpace(t.AssignedTo) == "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("tasks[%d].assigned_to is required", i))
+			return
+		}
+	}
+
+	// Create tasks in order, chaining depends_on N → N-1.
+	chainID := newChainID()
+	created := make([]model.Task, 0, len(req.Tasks))
+
+	for i, spec := range req.Tasks {
+		var dependsOn []string
+		if i > 0 {
+			dependsOn = []string{created[i-1].ID}
+		}
+		task, err := h.store.CreateTask(model.CreateTaskRequest{
+			Title:          spec.Title,
+			AssignedTo:     spec.AssignedTo,
+			Description:    spec.Description,
+			RequiresReview: spec.RequiresReview,
+			DependsOn:      dependsOn,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("create task[%d]: %v", i, err))
+			return
+		}
+		created = append(created, task)
+	}
+
+	// Dispatch only the first task.
+	first := created[0]
+	resp := model.ChainResponse{
+		ChainID:         chainID,
+		Tasks:           created,
+		FirstDispatched: first.ID,
+	}
+
+	sessionKey, known := openclaw.SessionKey(first.AssignedTo)
+	if !known {
+		resp.NotifyError = fmt.Sprintf("unknown agent %q – chain created but no session_send sent", first.AssignedTo)
+		log.Printf("[dispatch/chain] unknown agent %q – skipping sessions_send", first.AssignedTo)
+	} else if h.oc != nil {
+		msg := fmt.Sprintf("[agent-queue] 新任务派发：%s\ntask_id: %s\n\n请通过 POST /tasks/%s/claim 认领后执行。",
+			first.Title, first.ID, first.ID)
+		if err := h.oc.SendToSession(sessionKey, msg); err != nil {
+			resp.NotifyError = err.Error()
+			log.Printf("[dispatch/chain] sessions_send to %s failed: %v", sessionKey, err)
+		} else {
+			resp.Notified = true
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// -------------------------------------------------------------------
 // F1: /tasks
 // -------------------------------------------------------------------
 
@@ -178,13 +259,21 @@ func (h *Handler) handleTasksID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Special static sub-path: /tasks/summary
-	if path == "summary" {
+	// Special static sub-paths: /tasks/summary and /tasks/poll
+	switch path {
+	case "summary":
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		h.tasksSummary(w, r)
+		return
+	case "poll":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.tasksPoll(w, r)
 		return
 	}
 
@@ -295,6 +384,21 @@ func (h *Handler) claimTask(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, task)
 }
 
+// GET /tasks/poll?assigned_to=<agent>
+func (h *Handler) tasksPoll(w http.ResponseWriter, r *http.Request) {
+	assignedTo := r.URL.Query().Get("assigned_to")
+	if strings.TrimSpace(assignedTo) == "" {
+		writeError(w, http.StatusBadRequest, "assigned_to query param is required")
+		return
+	}
+	task, err := h.store.Poll(assignedTo)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, model.PollResponse{Task: task})
+}
+
 // GET /tasks/summary
 func (h *Handler) tasksSummary(w http.ResponseWriter, _ *http.Request) {
 	summary, err := h.store.Summary()
@@ -346,4 +450,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, model.ErrorResponse{Error: msg})
+}
+
+// newChainID generates a unique chain identifier.
+func newChainID() string {
+	return fmt.Sprintf("chain_%x", time.Now().UnixNano())
 }

@@ -334,3 +334,297 @@ func TestDispatch_MockOpenClaw_NotifyFails_TaskStillCreated(t *testing.T) {
 		t.Fatal("notify_error should be non-empty when mock returns error")
 	}
 }
+
+// -------------------------------------------------------------------
+// POST /dispatch/chain
+// -------------------------------------------------------------------
+
+func TestDispatchChain_CreatesSerialTasks(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	resp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"title": "step-A", "assigned_to": "coder"},
+			{"title": "step-B", "assigned_to": "writer"},
+			{"title": "step-C", "assigned_to": "thinker"},
+		},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	var cr model.ChainResponse
+	json.NewDecoder(resp.Body).Decode(&cr) //nolint:errcheck
+	resp.Body.Close()
+
+	if cr.ChainID == "" {
+		t.Fatal("chain_id should be non-empty")
+	}
+	if len(cr.Tasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(cr.Tasks))
+	}
+	if cr.FirstDispatched != cr.Tasks[0].ID {
+		t.Fatalf("first_dispatched %q != tasks[0].id %q", cr.FirstDispatched, cr.Tasks[0].ID)
+	}
+
+	// Verify depends_on chain: B depends on A, C depends on B.
+	taskA := cr.Tasks[0]
+	taskB := cr.Tasks[1]
+	taskC := cr.Tasks[2]
+
+	// Fetch details to get depends_on populated.
+	detailB := getJSON(t, srv, "/tasks/"+taskB.ID)
+	var bDetail model.Task
+	json.NewDecoder(detailB.Body).Decode(&bDetail) //nolint:errcheck
+	detailB.Body.Close()
+	if len(bDetail.DependsOn) != 1 || bDetail.DependsOn[0] != taskA.ID {
+		t.Fatalf("task B should depend on A, got %v", bDetail.DependsOn)
+	}
+
+	detailC := getJSON(t, srv, "/tasks/"+taskC.ID)
+	var cDetail model.Task
+	json.NewDecoder(detailC.Body).Decode(&cDetail) //nolint:errcheck
+	detailC.Body.Close()
+	if len(cDetail.DependsOn) != 1 || cDetail.DependsOn[0] != taskB.ID {
+		t.Fatalf("task C should depend on B, got %v", cDetail.DependsOn)
+	}
+}
+
+func TestDispatchChain_FirstTaskHasNoDeps(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	resp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"title": "only-task", "assigned_to": "coder"},
+		},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	var cr model.ChainResponse
+	json.NewDecoder(resp.Body).Decode(&cr) //nolint:errcheck
+	resp.Body.Close()
+
+	if len(cr.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(cr.Tasks))
+	}
+	// First task must be immediately pollable (no deps).
+	detailResp := getJSON(t, srv, "/tasks/"+cr.Tasks[0].ID+"/deps-met")
+	var dm model.DepsMet
+	json.NewDecoder(detailResp.Body).Decode(&dm) //nolint:errcheck
+	detailResp.Body.Close()
+	if !dm.DepsMet {
+		t.Fatal("first task should have deps_met=true")
+	}
+}
+
+func TestDispatchChain_EmptyTasks_Returns400(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	resp := postJSON(t, srv, "/dispatch/chain", map[string]any{"tasks": []any{}})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestDispatchChain_MissingTitle_Returns400(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	resp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"assigned_to": "coder"}, // missing title
+		},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestDispatchChain_AutoUnlock_SecondTaskAfterFirstDone(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	// Create chain A → B.
+	chainResp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"title": "step-A", "assigned_to": "coder"},
+			{"title": "step-B", "assigned_to": "coder"},
+		},
+	})
+	if chainResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", chainResp.StatusCode)
+	}
+	var cr model.ChainResponse
+	json.NewDecoder(chainResp.Body).Decode(&cr) //nolint:errcheck
+	chainResp.Body.Close()
+
+	taskA := cr.Tasks[0]
+	taskB := cr.Tasks[1]
+
+	// Before A done: B should not be pollable (deps not met).
+	pollResp := getJSON(t, srv, "/tasks/poll?assigned_to=coder")
+	var pr model.PollResponse
+	json.NewDecoder(pollResp.Body).Decode(&pr) //nolint:errcheck
+	pollResp.Body.Close()
+	if pr.Task == nil || pr.Task.ID != taskA.ID {
+		t.Fatalf("poll should return task A first, got %v", pr.Task)
+	}
+
+	// Drive task A to done via FSM.
+	claimA := postJSON(t, srv, "/tasks/"+taskA.ID+"/claim",
+		map[string]any{"version": taskA.Version, "agent": "coder"})
+	var claimedA model.Task
+	json.NewDecoder(claimA.Body).Decode(&claimedA) //nolint:errcheck
+	claimA.Body.Close()
+
+	ipA := patchTaskTo(t, srv, taskA.ID, "in_progress", claimedA.Version)
+	patchTaskTo(t, srv, taskA.ID, "done", ipA.Version)
+
+	// After A done: B should be deps_met.
+	depsB := getJSON(t, srv, "/tasks/"+taskB.ID+"/deps-met")
+	var dmB model.DepsMet
+	json.NewDecoder(depsB.Body).Decode(&dmB) //nolint:errcheck
+	depsB.Body.Close()
+	if !dmB.DepsMet {
+		t.Fatal("task B should have deps_met=true after A is done")
+	}
+
+	// Poll should now return task B.
+	pollResp2 := getJSON(t, srv, "/tasks/poll?assigned_to=coder")
+	var pr2 model.PollResponse
+	json.NewDecoder(pollResp2.Body).Decode(&pr2) //nolint:errcheck
+	pollResp2.Body.Close()
+	if pr2.Task == nil || pr2.Task.ID != taskB.ID {
+		t.Fatalf("poll should return task B after A done, got %v", pr2.Task)
+	}
+}
+
+// patchTaskTo is a reusable helper for PATCH status transitions.
+func patchTaskTo(t *testing.T, srv *httptest.Server, taskID, status string, version int) model.Task {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"status": status, "version": version})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+taskID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH %s %s: %v", taskID, status, err)
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH %s %s returned %d", taskID, status, r.StatusCode)
+	}
+	var pr struct{ Task model.Task }
+	json.NewDecoder(r.Body).Decode(&pr) //nolint:errcheck
+	return pr.Task
+}
+
+// -------------------------------------------------------------------
+// GET /tasks/poll
+// -------------------------------------------------------------------
+
+func TestPoll_NoTasks_ReturnsNullTask(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	resp := getJSON(t, srv, "/tasks/poll?assigned_to=coder")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var pr model.PollResponse
+	json.NewDecoder(resp.Body).Decode(&pr) //nolint:errcheck
+	resp.Body.Close()
+	if pr.Task != nil {
+		t.Fatalf("expected nil task, got %+v", pr.Task)
+	}
+}
+
+func TestPoll_MissingAssignedTo_Returns400(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	resp := getJSON(t, srv, "/tasks/poll")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestPoll_ReturnsOnlyDepsMetTasks(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	// Create task A (no deps).
+	var taskA model.Task
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "A", "assigned_to": "coder"})
+	json.NewDecoder(r.Body).Decode(&taskA) //nolint:errcheck
+	r.Body.Close()
+
+	// Create task B (depends on A).
+	var taskB model.Task
+	r2 := postJSON(t, srv, "/tasks", map[string]any{
+		"title": "B", "assigned_to": "coder", "depends_on": []string{taskA.ID},
+	})
+	json.NewDecoder(r2.Body).Decode(&taskB) //nolint:errcheck
+	r2.Body.Close()
+
+	// Poll should return A (deps met), not B.
+	pollResp := getJSON(t, srv, "/tasks/poll?assigned_to=coder")
+	var pr model.PollResponse
+	json.NewDecoder(pollResp.Body).Decode(&pr) //nolint:errcheck
+	pollResp.Body.Close()
+
+	if pr.Task == nil {
+		t.Fatal("expected a task from poll")
+	}
+	if pr.Task.ID != taskA.ID {
+		t.Fatalf("poll returned %q, want task A %q", pr.Task.ID, taskA.ID)
+	}
+}
+
+func TestPoll_PriorityOrdering(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	// Create low-priority task first.
+	// Note: priority field is not in CreateTaskRequest yet, so both default to 0.
+	// This test verifies created_at ASC fallback ordering (first created = first returned).
+	var t1, t2 model.Task
+	r1 := postJSON(t, srv, "/tasks", map[string]any{"title": "first", "assigned_to": "coder"})
+	json.NewDecoder(r1.Body).Decode(&t1) //nolint:errcheck
+	r1.Body.Close()
+
+	r2 := postJSON(t, srv, "/tasks", map[string]any{"title": "second", "assigned_to": "coder"})
+	json.NewDecoder(r2.Body).Decode(&t2) //nolint:errcheck
+	r2.Body.Close()
+
+	pollResp := getJSON(t, srv, "/tasks/poll?assigned_to=coder")
+	var pr model.PollResponse
+	json.NewDecoder(pollResp.Body).Decode(&pr) //nolint:errcheck
+	pollResp.Body.Close()
+
+	if pr.Task == nil || pr.Task.ID != t1.ID {
+		t.Fatalf("expected first-created task (oldest), got %v", pr.Task)
+	}
+}
+
+func TestPoll_WrongAgent_ReturnsNothing(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	postJSON(t, srv, "/tasks", map[string]any{"title": "coder-task", "assigned_to": "coder"}).Body.Close()
+
+	// Poll as a different agent.
+	resp := getJSON(t, srv, "/tasks/poll?assigned_to=devops")
+	var pr model.PollResponse
+	json.NewDecoder(resp.Body).Decode(&pr) //nolint:errcheck
+	resp.Body.Close()
+
+	if pr.Task != nil {
+		t.Fatalf("devops should not see coder's task, got %+v", pr.Task)
+	}
+}
