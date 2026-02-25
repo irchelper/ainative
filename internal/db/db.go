@@ -14,20 +14,22 @@ PRAGMA busy_timeout=5000;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS tasks (
-  id              TEXT PRIMARY KEY,
-  title           TEXT NOT NULL,
-  description     TEXT NOT NULL DEFAULT '',
-  status          TEXT NOT NULL DEFAULT 'pending',
-  assigned_to     TEXT NOT NULL DEFAULT '',
-  parent_id       TEXT NOT NULL DEFAULT '',
-  mode            TEXT NOT NULL DEFAULT '',
-  requires_review INTEGER NOT NULL DEFAULT 0,
-  result          TEXT NOT NULL DEFAULT '',
-  version         INTEGER NOT NULL DEFAULT 1,
-  priority        INTEGER NOT NULL DEFAULT 0,
-  started_at      DATETIME,
-  created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id                TEXT PRIMARY KEY,
+  title             TEXT NOT NULL,
+  description       TEXT NOT NULL DEFAULT '',
+  status            TEXT NOT NULL DEFAULT 'pending',
+  assigned_to       TEXT NOT NULL DEFAULT '',
+  retry_assigned_to TEXT NOT NULL DEFAULT '',
+  parent_id         TEXT NOT NULL DEFAULT '',
+  mode              TEXT NOT NULL DEFAULT '',
+  requires_review   INTEGER NOT NULL DEFAULT 0,
+  result            TEXT NOT NULL DEFAULT '',
+  failure_reason    TEXT NOT NULL DEFAULT '',
+  version           INTEGER NOT NULL DEFAULT 1,
+  priority          INTEGER NOT NULL DEFAULT 0,
+  started_at        DATETIME,
+  created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS task_deps (
@@ -65,6 +67,8 @@ func Open(path string) (*sql.DB, error) {
 	// Migrations: ALTER TABLE is silently ignored if the column already exists.
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN started_at DATETIME`)
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN retry_assigned_to TEXT NOT NULL DEFAULT ''`)
 
 	return db, nil
 }

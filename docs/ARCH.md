@@ -268,6 +268,79 @@ failure_reason: {reason}
 
 ---
 
+## 异常处理与退单
+
+### retry_assigned_to 自动退单机制
+
+专家发现问题时，PATCH failed 并在 result 里声明退单目标：
+
+**result 格式：**
+```
+"<失败原因描述> | retry_assigned_to: <专家名>"
+```
+
+**示例：**
+```
+# qa 发现 coder bug
+result: "登录按钮无响应 | retry_assigned_to: coder"
+
+# writer 发现需求不可实现
+result: "第3章登录态存储方案未定义 | retry_assigned_to: pm"
+
+# devops 发现架构问题
+result: "容器无法启动，端口设计有误 | retry_assigned_to: thinker"
+
+# coder 发现架构缺陷
+result: "auth 模块无法解耦 | retry_assigned_to: thinker"
+```
+
+**Go server 处理逻辑：**
+1. 解析 result 中的 `retry_assigned_to: {name}`
+2. 有值 → 自动建新任务（title: `retry: {原任务title}`，assigned_to = 退单目标专家），**不通知 CEO**
+3. 无值 → 触发 CEO SessionNotifier（兜底，需人工判断）
+
+### 退单映射规范（各专家退单合同）
+
+各专家遇到不同类型问题时的标准退单目标：
+
+| 发现问题的专家 | 问题类型 | 退单给 |
+|---|---|---|
+| qa | 代码 bug | coder |
+| qa | UI/交互问题 | uiux |
+| coder | 架构设计缺陷 | thinker |
+| coder | 需求不明确 | pm |
+| writer | 需求不可实现 | pm |
+| devops | 代码 bug 导致部署失败 | coder |
+| devops | 架构设计问题 | thinker |
+| thinker | 文档描述不准确 | writer |
+| uiux | 需求模糊 | pm |
+
+**设计原则：** 退单是网状结构，专家间可直接退单，不经过 CEO 中转；仅当无法确定退单目标时才上报 CEO（SessionNotifier 兜底）。
+
+### CEO SessionNotifier（兜底机制）
+
+触发条件：PATCH failed 且 result 中没有 `retry_assigned_to`
+
+**实现：**
+```
+调用 /tools/invoke sessions_send → CEO session
+session key: agent:ceo:discord:channel:1475338424293789877
+消息格式：
+  [agent-queue] ⚠️ 任务失败需介入：{title}
+  result: {result}
+  task_id: {id}
+```
+
+**决策选项（CEO 收到通知后）：**
+
+| 选项 | 操作 | 适用场景 |
+|------|------|---------|
+| 原 agent 重试 | `PATCH {"status":"pending","version":N}` | 临时故障 |
+| 改派其他 agent | `PATCH {"status":"pending","retry_assigned_to":"other","version":N}` | 换人处理 |
+| 取消任务 | `PATCH {"status":"cancelled","version":N}` | 任务无意义 |
+
+---
+
 ## 专家自驱 Claim（P3）
 
 **设计目标：** CEO 提交任务链后全程不介入，专家 session 启动即自动认领并执行，串行链自动流转至终点。

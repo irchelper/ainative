@@ -372,13 +372,23 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // handleFailedTask is called asynchronously when a task transitions to failed.
-// It parses the result field for a retry directive and either:
-//   - creates a new retry task + dispatches to the specified agent, or
-//   - notifies the CEO session for human intervention.
+//
+// Retry directive resolution (priority order):
+//  1. task.RetryAssignedTo field (set explicitly via PATCH body)
+//  2. failparser.ParseRetryAgent(task.Result) – legacy inline format
+//
+// If a retry agent is identified → auto-create retry task + dispatch (no CEO notify).
+// Otherwise → SessionNotifier alerts CEO for human intervention.
 func (h *Handler) handleFailedTask(task model.Task) {
 	go func() {
-		retryAgent, hasRetry := failparser.ParseRetryAgent(task.Result)
-		if hasRetry {
+		// Priority 1: explicit retry_assigned_to field.
+		retryAgent := task.RetryAssignedTo
+		// Priority 2: inline result format (legacy/expert shorthand).
+		if retryAgent == "" {
+			retryAgent, _ = failparser.ParseRetryAgent(task.Result)
+		}
+
+		if retryAgent != "" {
 			h.autoRetry(task, retryAgent)
 		} else {
 			if h.sessionN != nil {
@@ -391,12 +401,17 @@ func (h *Handler) handleFailedTask(task model.Task) {
 }
 
 // autoRetry creates a new task for the retry agent and dispatches it.
+// Per spec: does NOT notify CEO.
 func (h *Handler) autoRetry(original model.Task, retryAgent string) {
+	failureDesc := original.FailureReason
+	if failureDesc == "" {
+		failureDesc = original.Result
+	}
 	newTask, err := h.store.CreateTask(model.CreateTaskRequest{
 		Title:       "retry: " + original.Title,
 		AssignedTo:  retryAgent,
 		Priority:    original.Priority,
-		Description: "failed原因: " + original.Result,
+		Description: "failed原因: " + failureDesc,
 	})
 	if err != nil {
 		log.Printf("[handler] autoRetry CreateTask failed for original %s: %v", original.ID, err)
@@ -405,7 +420,7 @@ func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 	log.Printf("[handler] autoRetry: created task %s for agent %s (original: %s)",
 		newTask.ID, retryAgent, original.ID)
 
-	// Dispatch without notifying CEO (per spec: "不通知 CEO").
+	// Dispatch to expert session (no CEO notification per spec).
 	sessionKey, known := openclaw.SessionKey(retryAgent)
 	if !known {
 		log.Printf("[handler] autoRetry: unknown agent %q – task %s created but not dispatched", retryAgent, newTask.ID)

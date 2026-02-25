@@ -536,24 +536,99 @@ func driveToFailed(t *testing.T, srv *httptest.Server, title, result string) mod
 	return pr.Task
 }
 
-func TestFailed_IsTerminal_CannotTransitionOut(t *testing.T) {
+func TestFailed_PendingAllowed_CanRetry(t *testing.T) {
 	srv := newTestServer(t, nil)
 	defer srv.Close()
 
-	failed := driveToFailed(t, srv, "fail-me", "no retry")
+	failed := driveToFailed(t, srv, "fail-me", "no retry directive")
 
 	if failed.Status != model.StatusFailed {
 		t.Fatalf("expected failed, got %s", failed.Status)
 	}
 
-	// failed → pending should be 422 (terminal state).
-	body, _ := json.Marshal(map[string]any{"status": "pending", "version": failed.Version})
+	// failed → pending should be 200 (CEO retry).
+	retried := patchTaskTo(t, srv, failed.ID, "pending", failed.Version)
+	if retried.Status != model.StatusPending {
+		t.Fatalf("expected pending after CEO retry, got %s", retried.Status)
+	}
+}
+
+func TestFailed_CannotTransitionToInProgress(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	failed := driveToFailed(t, srv, "fail-me2", "no retry")
+
+	// failed → in_progress should be 422.
+	body, _ := json.Marshal(map[string]any{"status": "in_progress", "version": failed.Version})
 	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+failed.ID, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for failed→pending, got %d", resp.StatusCode)
+		t.Fatalf("expected 422 for failed→in_progress, got %d", resp.StatusCode)
+	}
+}
+
+func TestFailed_RetryWithRetryAssignedTo(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	// Fail a task, then CEO retries with retry_assigned_to override.
+	failed := driveToFailed(t, srv, "改派任务", "原 coder 无法处理")
+
+	body, _ := json.Marshal(map[string]any{
+		"status":           "pending",
+		"retry_assigned_to": "thinker",
+		"version":          failed.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+failed.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	var pr struct{ Task model.Task }
+	json.NewDecoder(resp.Body).Decode(&pr) //nolint:errcheck
+	resp.Body.Close()
+
+	if pr.Task.Status != model.StatusPending {
+		t.Fatalf("expected pending, got %s", pr.Task.Status)
+	}
+	if pr.Task.AssignedTo != "thinker" {
+		t.Fatalf("expected assigned_to=thinker after retry, got %q", pr.Task.AssignedTo)
+	}
+}
+
+func TestFailed_FailureReasonField(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	var task model.Task
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "t", "assigned_to": "coder"})
+	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
+	r.Body.Close()
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
+		map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
+	claimR.Body.Close()
+
+	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	// PATCH with explicit failure_reason field.
+	body, _ := json.Marshal(map[string]any{
+		"status":         "failed",
+		"failure_reason": "依赖服务 API 返回 503",
+		"version":        ipTask.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	var pr struct{ Task model.Task }
+	json.NewDecoder(resp.Body).Decode(&pr) //nolint:errcheck
+	resp.Body.Close()
+
+	if pr.Task.FailureReason != "依赖服务 API 返回 503" {
+		t.Fatalf("failure_reason not saved: got %q", pr.Task.FailureReason)
 	}
 }
 

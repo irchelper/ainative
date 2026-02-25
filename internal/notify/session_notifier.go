@@ -29,11 +29,19 @@ func NewSessionNotifier(client *openclaw.Client, ceoSessionKey string) *SessionN
 }
 
 // OnFailed sends a CEO alert for a failed task that has no retry directive.
+// Message format matches docs/ARCH.md F11 spec.
 // Called asynchronously from handler; errors are logged, not propagated.
 func (s *SessionNotifier) OnFailed(task model.Task) error {
+	reason := task.FailureReason
+	if reason == "" {
+		reason = task.Result
+	}
+	if reason == "" {
+		reason = "（无）"
+	}
 	msg := fmt.Sprintf(
-		"[agent-queue] ⚠️ 任务失败需介入：%s\nresult: %s\ntask_id: %s",
-		task.Title, task.Result, task.ID,
+		"⚠️ 任务失败：%s\ntask_id: %s\nassigned_to: %s\nfailure_reason: %s\n请检查并决定：重试 / 改派 / 取消",
+		task.Title, task.ID, task.AssignedTo, reason,
 	)
 	if err := s.client.SendToSession(s.ceoSessionKey, msg); err != nil {
 		log.Printf("[session_notifier] OnFailed → %s failed: %v", s.ceoSessionKey, err)

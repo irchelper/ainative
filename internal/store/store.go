@@ -34,10 +34,10 @@ func (s *Store) CreateTask(req model.CreateTaskRequest) (model.Task, error) {
 	defer tx.Rollback() //nolint:errcheck
 
 	_, err = tx.Exec(`
-		INSERT INTO tasks (id, title, description, status, assigned_to, parent_id, mode,
-		                   requires_review, priority, version, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, 1, ?, ?)`,
-		id, req.Title, req.Description, req.AssignedTo,
+		INSERT INTO tasks (id, title, description, status, assigned_to, retry_assigned_to,
+		                   parent_id, mode, requires_review, priority, version, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+		id, req.Title, req.Description, req.AssignedTo, req.RetryAssignedTo,
 		req.ParentID, req.Mode, boolToInt(req.RequiresReview), req.Priority,
 		now, now)
 	if err != nil {
@@ -89,8 +89,8 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 		args = append(args, parentID)
 	}
 
-	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.parent_id,
-	                 t.mode, t.requires_review, t.result, t.version, t.priority, t.started_at, t.created_at, t.updated_at
+	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.parent_id,
+	                 t.mode, t.requires_review, t.result, t.failure_reason, t.version, t.priority, t.started_at, t.created_at, t.updated_at
 	          FROM tasks t
 	          WHERE ` + strings.Join(where, " AND ") + `
 	          ORDER BY t.created_at ASC`
@@ -137,8 +137,8 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 // GetByID returns a single task with its depends_on list and history.
 func (s *Store) GetByID(id string) (model.Task, error) {
 	row := s.db.QueryRow(`
-		SELECT id, title, description, status, assigned_to, parent_id,
-		       mode, requires_review, result, version, priority, started_at, created_at, updated_at
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, parent_id,
+		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTaskRow(row)
@@ -236,8 +236,8 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 
 	// Fetch current task inside the transaction.
 	row := tx.QueryRow(`
-		SELECT id, title, description, status, assigned_to, parent_id,
-		       mode, requires_review, result, version, priority, started_at, created_at, updated_at
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, parent_id,
+		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
 	current, err := scanTaskRow(row)
@@ -273,8 +273,20 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 		}
 
 		// On timeout/release back to pending, clear assigned_to.
+		// On failed→pending retry: apply retry_assigned_to if set.
 		if newStatus == model.StatusPending {
-			setClauses = append(setClauses, "assigned_to = ''")
+			retryTo := current.RetryAssignedTo
+			// Allow PATCH body to override retry_assigned_to at retry time.
+			if req.RetryAssignedTo != nil {
+				retryTo = *req.RetryAssignedTo
+			}
+			if retryTo != "" {
+				setClauses = append(setClauses, "assigned_to = ?")
+				args = append(args, retryTo)
+				setClauses = append(setClauses, "retry_assigned_to = ''")
+			} else {
+				setClauses = append(setClauses, "assigned_to = ''")
+			}
 		}
 	} else {
 		newStatus = current.Status
@@ -285,7 +297,16 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 		args = append(args, *req.Result)
 	}
 
+	if req.FailureReason != nil {
+		setClauses = append(setClauses, "failure_reason = ?")
+		args = append(args, *req.FailureReason)
+	}
 
+	if req.RetryAssignedTo != nil && (req.Status == nil || *req.Status != model.StatusPending) {
+		// Store retry_assigned_to for future use (not a retry transition yet).
+		setClauses = append(setClauses, "retry_assigned_to = ?")
+		args = append(args, *req.RetryAssignedTo)
+	}
 
 	args = append(args, id)
 	updateSQL := "UPDATE tasks SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
@@ -405,8 +426,8 @@ func (s *Store) Poll(assignedTo string) (*model.Task, error) {
 
 	// Phase 1: collect all candidate tasks (close cursor before deps check).
 	rows, err := s.db.Query(`
-		SELECT id, title, description, status, assigned_to, parent_id, mode,
-		       requires_review, result, version, priority, started_at, created_at, updated_at
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, parent_id, mode,
+		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks
 		WHERE status = 'pending' AND assigned_to = ?
 		ORDER BY priority DESC, created_at ASC
@@ -592,8 +613,8 @@ func scanTaskImpl(r taskScanner) (model.Task, error) {
 	var t model.Task
 	var rr int
 	err := r.Scan(&t.ID, &t.Title, &t.Description, (*string)(&t.Status),
-		&t.AssignedTo, &t.ParentID, &t.Mode, &rr,
-		&t.Result, &t.Version, &t.Priority,
+		&t.AssignedTo, &t.RetryAssignedTo, &t.ParentID, &t.Mode, &rr,
+		&t.Result, &t.FailureReason, &t.Version, &t.Priority,
 		&t.StartedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return model.Task{}, err
@@ -638,7 +659,8 @@ func validateTransition(from, to model.Status, requiresReview bool) error {
 		{model.StatusReview, model.StatusInProgress}:    true,
 		{model.StatusBlocked, model.StatusPending}:      true,
 		{model.StatusBlocked, model.StatusInProgress}:   true,
-		// failed is terminal – no outgoing transitions
+		// failed → pending: CEO retry (optional retry_assigned_to)
+		{model.StatusFailed, model.StatusPending}:       true,
 	}
 	if !allowed[transition{from, to}] {
 		return &ValidationError{Msg: fmt.Sprintf("transition %s → %s is not allowed", from, to)}

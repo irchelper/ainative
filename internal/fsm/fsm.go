@@ -33,7 +33,10 @@ var validTransitions = map[model.Status]map[model.Status]bool{
 		model.StatusPending:    true, // unblock
 		model.StatusInProgress: true, // direct resume
 	},
-	model.StatusFailed:    {}, // terminal – retry via new task, not state transition
+	// failed → pending: CEO decides to retry (with optional retry_assigned_to).
+	model.StatusFailed: {
+		model.StatusPending: true,
+	},
 	model.StatusDone:      {}, // terminal
 	model.StatusCancelled: {}, // terminal
 }

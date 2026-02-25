@@ -3,7 +3,7 @@
 > Status: Draft → v5
 > Owner: 产品经理
 > Date: 2026-02-25
-> Updated: 2026-02-25 (v5 — 异常感知：failed 状态 + retry_assigned_to + SessionNotifier；F4 状态机 7→8 态；F6 双 Notifier 模式；新增 F9/F10/F11)
+> Updated: 2026-02-25 (v6 — 新增 F12 retry_assigned_to 自动退单机制；退单映射规范；异常处理独立章节写入 ARCH.md)
 
 ---
 
@@ -374,6 +374,46 @@ type Notifier interface {
 - [ ] CEO `PATCH failed→pending`（含 retry_assigned_to）后任务重回可认领池
 - [ ] 正常 `done` 流程不触发 SessionNotifier（CEO 零干扰验证）
 - [ ] SessionNotifier 失败时降级为 Discord webhook 兜底通知，不阻塞状态变更
+
+### F12: retry_assigned_to 自动退单机制
+
+| 功能 | 描述 | 优先级 |
+|------|------|--------|
+| result 内嵌退单声明 | 专家在 PATCH failed 的 result 中写 `retry_assigned_to: <专家名>` | P0 |
+| 自动建新任务 | Go server 解析 result → 自动建 `retry: {原任务title}` 任务，派给目标专家 | P0 |
+| 不通知 CEO | 退单自动完成，不触发 SessionNotifier（CEO 零干扰） | P0 |
+| CEO 兜底 | result 中无 `retry_assigned_to` → 触发 SessionNotifier，CEO 人工决策 | P0 |
+| 网状退单支持 | 任意专家间可互相退单，无需 CEO 介入 | P1 |
+
+**退单映射规范（各专家退单合同）：**
+
+| 发现问题的专家 | 问题类型 | 退单给 |
+|---|---|---|
+| qa | 代码 bug | coder |
+| qa | UI/交互问题 | uiux |
+| coder | 架构设计缺陷 | thinker |
+| coder | 需求不明确 | pm |
+| writer | 需求不可实现 | pm |
+| devops | 代码 bug 导致部署失败 | coder |
+| devops | 架构设计问题 | thinker |
+| thinker | 文档描述不准确 | writer |
+| uiux | 需求模糊 | pm |
+
+**result 格式合同：**
+```
+"<失败原因描述> | retry_assigned_to: <专家名>"
+
+示例：
+"登录按钮无响应 | retry_assigned_to: coder"
+"第3章登录态存储方案未定义 | retry_assigned_to: pm"
+"容器无法启动，端口设计有误 | retry_assigned_to: thinker"
+```
+
+**验收标准：**
+- [ ] PATCH failed + result 含 `retry_assigned_to: coder` → Go server 自动建 `retry: {title}` 任务，assigned_to=coder，不唤醒 CEO
+- [ ] PATCH failed + result 无 `retry_assigned_to` → 触发 SessionNotifier 唤醒 CEO
+- [ ] 自动建的 retry 任务可被目标专家通过 `GET /tasks/poll` 正常认领
+- [ ] 退单不影响原任务的 failed 终态（原任务保持 failed，不自动重置）
 
 ---
 
