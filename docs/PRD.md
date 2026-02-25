@@ -3,7 +3,7 @@
 > Status: Draft → v5
 > Owner: 产品经理
 > Date: 2026-02-25
-> Updated: 2026-02-26 (v9 — 新增 F14 失败链路自动恢复：superseded_by 字段 + depsMetForID SQL 扩展 + blocked_downstream 响应字段)
+> Updated: 2026-02-26 (v10 — V8: 新增 F15 链路完成通知 CEO（notify_ceo_on_complete + chain_id）、F16 Go server retry 路由表（替代 SOUL.md 硬编码）; triggered 缺口修复说明)
 
 ---
 
@@ -486,6 +486,110 @@ B → poll → claim → 执行 → done → C 解锁 ...
 - [ ] B 被 sessions_send 唤醒（链路从断点恢复，无 CEO 介入）
 - [ ] PATCH failed 响应含 `blocked_downstream` 列表（含 B、C）
 - [ ] CEO PATCH A: failed→pending（人工重试）后，A.superseded_by 被清空
+
+### F15: 链路完成通知 CEO（V8 新增）
+
+| 功能 | 描述 | 优先级 |
+|------|------|--------|
+| `notify_ceo_on_complete` 字段 | tasks 表新增 `notify_ceo_on_complete INTEGER NOT NULL DEFAULT 0`，dispatch/chain 时按请求体写入 | P0 |
+| `chain_id` 字段 | tasks 表新增 `chain_id TEXT NOT NULL DEFAULT ''`，dispatch/chain 时 server 自动生成并写入全链任务 | P0 |
+| 链路完成检测 | PATCH done 时若 `chain_id != "" && notify_ceo_on_complete=1`，调 `IsChainComplete(chain_id)` | P0 |
+| `IsChainComplete` | SQL 检查链内所有任务是否全部 done/cancelled/superseded；含 superseded_by 兼容逻辑 | P0 |
+| `OnChainComplete` | CEO session 收到完整链路汇总消息（chain_title + 所有子任务 result）| P0 |
+| `GET /chains/:chain_id` | 查询链路下所有任务状态（可选，P1）| P1 |
+| 向后兼容 | 未传 notify_ceo_on_complete 的请求行为不变（不通知 CEO） | P0 |
+
+**dispatch/chain 请求体新增字段：**
+```json
+{
+  "tasks": [...],
+  "notify_ceo_on_complete": true,
+  "chain_title": "需求分析→技术设计→编码实现"
+}
+```
+
+**SessionNotifier.OnChainComplete 消息格式：**
+```
+[agent-queue] ✅ 任务链完成：{chain_title 或 "链路 chain_id"}
+完成任务数：{done_count}/{total_count}
+链路任务：
+  ✅ {task1.title} ({task1.assigned_to}) — {task1.result}
+  ✅ {task2.title} ({task2.assigned_to}) — {task2.result}
+  ✅ {task3.title} ({task3.assigned_to}) — {task3.result}
+chain_id: {chain_id}
+```
+
+**验收标准：**
+- [ ] dispatch/chain 传 `notify_ceo_on_complete=true` + `chain_title` → 全链任务的 `notify_ceo_on_complete=1`、`chain_id=<生成值>`
+- [ ] 链路最后一个任务 PATCH done → IsChainComplete 返回 true → CEO session 收到 OnChainComplete 消息
+- [ ] 消息含 chain_title、所有子任务 title + assigned_to + result、chain_id
+- [ ] notify_ceo_on_complete=false（或未传）时，PATCH done 不触发 CEO 通知
+- [ ] autoRetry 替换的 X' 完成后，IsChainComplete 仍能正确检测（含 superseded_by 兼容）
+- [ ] `GET /chains/:chain_id` 返回链路下所有任务（含 done 比例、is_complete 标志）
+
+### F16: Go server retry 路由表（V8 新增）
+
+| 功能 | 描述 | 优先级 |
+|------|------|--------|
+| `retry_routing` SQLite 表 | 存储 from_agent + error_keyword + to_agent + priority 映射 | P0 |
+| 服务端自动查表 | PATCH failed 时按优先级链：body > failparser > retry_routing > CEO | P0 |
+| 初始 seed 数据 | server 启动时写入 9 专家默认映射（12 条规则，含兜底规则） | P0 |
+| `GET /retry-routing` | 查询全部路由规则 | P0 |
+| `POST /retry-routing` | 添加规则（online CRUD，无需重启） | P1 |
+| `DELETE /retry-routing/:id` | 删除规则 | P1 |
+| SOUL.md 减负 | 各专家 SOUL.md 可删除 F12 退单映射表（15-20行）| P1 |
+
+**查表 SQL：**
+```sql
+SELECT retry_assigned_to FROM retry_routing
+WHERE assigned_to = ?
+  AND (error_keyword = '' OR result LIKE '%' || error_keyword || '%')
+ORDER BY priority DESC
+LIMIT 1
+```
+
+**优先级链：**
+```
+1. PATCH body 显式传 retry_assigned_to → 直接用
+2. failparser 解析 result "| retry_assigned_to: X" → 用
+3. retry_routing 表查表（error_keyword 命中优先，兜底 ''）→ 用
+4. 全未命中 → SessionNotifier CEO（人工决策）
+```
+
+**初始 seed（12 条规则）：**
+
+| from | error_keyword | to | priority |
+|------|---------------|----|---------|
+| qa | bug | coder | 10 |
+| qa | ui | uiux | 10 |
+| qa | （兜底） | coder | 0 |
+| coder | 架构 | thinker | 10 |
+| coder | 需求 | pm | 10 |
+| coder | （兜底） | thinker | 0 |
+| writer | （兜底） | pm | 0 |
+| devops | bug | coder | 10 |
+| devops | 架构 | thinker | 10 |
+| devops | （兜底） | coder | 0 |
+| thinker | （兜底） | writer | 0 |
+| uiux | （兜底） | pm | 0 |
+
+**验收标准：**
+- [ ] server 启动后 `GET /retry-routing` 返回 12 条初始规则
+- [ ] qa PATCH failed + result 含 "bug" → autoRetry 自动退单 coder（不 CEO）
+- [ ] devops PATCH failed + result 含 "架构" → autoRetry 自动退单 thinker（不 CEO）
+- [ ] coder PATCH failed + result 不含关键词 → 查兜底规则 → autoRetry 退单 thinker
+- [ ] result 不含 retry_assigned_to 且 assigned_to 无匹配规则 → SessionNotifier CEO
+- [ ] body 显式 retry_assigned_to 优先级高于查表结果
+
+### F16 补充说明：triggered 缺口修复（V8 bug fix）
+
+| 缺口 | 影响 | 修复方案 |
+|------|------|---------|
+| patchTask done 时 unlockDependents 返回 triggered，但未调 SessionNotifier 唤醒下游 | 串行链依赖解锁后下游专家不会被自动唤醒；必须靠专家 startup poll 发现任务 | patchTask done 分支遍历 triggered 列表，逐一 SessionNotifier.Dispatch(assignedTo, taskID) |
+
+**验收标准：**
+- [ ] 链 A→B→C，A PATCH done → B 的 assigned_to 专家 session 收到 SessionNotifier 唤醒消息
+- [ ] B 专家不需要等 startup 自驱 poll，会立即收到通知触发 poll
 
 ---
 

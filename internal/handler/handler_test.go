@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -708,15 +709,65 @@ func TestFailed_AutoRetry_CreatesNewTask(t *testing.T) {
 	}
 }
 
-func TestFailed_NoRetryDirective_NoNewTask(t *testing.T) {
-	// Mock CEO session notifier capture.
+// TestFailed_RetryRouting_TableLookup verifies that when no explicit retry_assigned_to
+// is given, the retry_routing table is queried and the matching agent is used.
+// coder's catch-all rule routes to thinker.
+func TestFailed_RetryRouting_TableLookup(t *testing.T) {
+	var dispatched []map[string]any
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		dispatched = append(dispatched, body)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	// Fail a coder task with no explicit retry directive.
+	// V8: retry_routing catch-all rule coder→thinker should fire.
+	driveToFailed(t, srv, "重要任务", "完全崩溃，没有重试方案")
+
+	time.Sleep(150 * time.Millisecond)
+
+	// A retry task should be created for thinker (coder catch-all → thinker).
+	listResp := getJSON(t, srv, "/tasks?assigned_to=thinker")
+	var listBody struct {
+		Tasks []model.Task `json:"tasks"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listBody) //nolint:errcheck
+	listResp.Body.Close()
+
+	var retryTask *model.Task
+	for i := range listBody.Tasks {
+		if strings.HasPrefix(listBody.Tasks[i].Title, "retry:") {
+			retryTask = &listBody.Tasks[i]
+			break
+		}
+	}
+	if retryTask == nil {
+		t.Fatal("retry_routing catch-all should have created a retry task for thinker")
+	}
+	if retryTask.AssignedTo != "thinker" {
+		t.Fatalf("expected retry task assigned to thinker, got %q", retryTask.AssignedTo)
+	}
+}
+
+// TestFailed_NoRetryDirective_CEOAlert verifies that when assigned_to is not in
+// retry_routing, the CEO session receives a ❌ alert.
+func TestFailed_NoRetryDirective_CEOAlert(t *testing.T) {
+	var mu sync.Mutex
 	var ceoMessages []string
 	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 		if args, ok := body["args"].(map[string]any); ok {
 			if msg, ok := args["message"].(string); ok {
+				mu.Lock()
 				ceoMessages = append(ceoMessages, msg)
+				mu.Unlock()
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
@@ -727,33 +778,208 @@ func TestFailed_NoRetryDirective_NoNewTask(t *testing.T) {
 	srv := newTestServer(t, oc)
 	defer srv.Close()
 
-	driveToFailed(t, srv, "重要任务", "完全崩溃，没有重试方案")
+	// Use an agent not in retry_routing to ensure no table match → CEO alert.
+	// Create task manually with assigned_to="vision" (no catch-all in seed data).
+	var task model.Task
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "vision-task", "assigned_to": "vision"})
+	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
+	r.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
+		map[string]any{"version": task.Version, "agent": "vision"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
+	claimR.Body.Close()
 
-	// No new task should be created.
-	listResp := getJSON(t, srv, "/tasks?assigned_to=coder")
-	var listBody struct {
-		Tasks []model.Task `json:"tasks"`
-	}
-	json.NewDecoder(listResp.Body).Decode(&listBody) //nolint:errcheck
-	listResp.Body.Close()
+	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
 
-	for _, t2 := range listBody.Tasks {
-		if strings.HasPrefix(t2.Title, "retry:") {
-			t.Fatal("no retry task should be created when no retry_assigned_to directive")
-		}
-	}
+	body, _ := json.Marshal(map[string]any{"status": "failed", "result": "完全崩溃，无法处理", "version": ipTask.Version})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	time.Sleep(200 * time.Millisecond)
 
 	// CEO should have been notified.
+	mu.Lock()
+	snap := make([]string, len(ceoMessages))
+	copy(snap, ceoMessages)
+	mu.Unlock()
+
 	found := false
-	for _, msg := range ceoMessages {
-		if strings.Contains(msg, "❌") && strings.Contains(msg, "重要任务") {
+	for _, msg := range snap {
+		if strings.Contains(msg, "❌") && strings.Contains(msg, "vision-task") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("CEO should have received ❌ alert for failed task, got: %v", ceoMessages)
+		t.Errorf("CEO should have received ❌ alert for failed task, got: %v", snap)
+	}
+}
+
+// -------------------------------------------------------------------
+// V8: chain complete notification + triggered dispatch fix
+// -------------------------------------------------------------------
+
+func TestV8_ChainComplete_NotifiesCEO(t *testing.T) {
+	var mu sync.Mutex
+	var ceoMessages []string
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if args, ok := body["args"].(map[string]any); ok {
+			if msg, ok := args["message"].(string); ok {
+				mu.Lock()
+				ceoMessages = append(ceoMessages, msg)
+				mu.Unlock()
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	// Create chain A→B with notify_ceo_on_complete=true.
+	chainResp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"title": "chain-A", "assigned_to": "coder"},
+			{"title": "chain-B", "assigned_to": "writer"},
+		},
+		"notify_ceo_on_complete": true,
+		"chain_title":            "测试链路",
+	})
+	if chainResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", chainResp.StatusCode)
+	}
+	var cr model.ChainResponse
+	json.NewDecoder(chainResp.Body).Decode(&cr) //nolint:errcheck
+	chainResp.Body.Close()
+
+	taskA := cr.Tasks[0]
+	taskB := cr.Tasks[1]
+
+	// Drive A to done.
+	claimA := postJSON(t, srv, "/tasks/"+taskA.ID+"/claim",
+		map[string]any{"version": taskA.Version, "agent": "coder"})
+	var claimedA model.Task
+	json.NewDecoder(claimA.Body).Decode(&claimedA) //nolint:errcheck
+	claimA.Body.Close()
+	ipA := patchTaskTo(t, srv, taskA.ID, "in_progress", claimedA.Version)
+	patchTaskTo(t, srv, taskA.ID, "done", ipA.Version)
+
+	// CEO should NOT be notified yet (chain not complete).
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	foundChain := false
+	for _, msg := range ceoMessages {
+		if strings.Contains(msg, "✅") && strings.Contains(msg, "任务链") {
+			foundChain = true
+		}
+	}
+	mu.Unlock()
+	if foundChain {
+		t.Error("CEO should NOT be notified until chain is fully complete")
+	}
+
+	// Drive B to done → chain complete.
+	// B was unlocked by A done; claim it.
+	claimB := postJSON(t, srv, "/tasks/"+taskB.ID+"/claim",
+		map[string]any{"version": taskB.Version, "agent": "writer"})
+	var claimedB model.Task
+	json.NewDecoder(claimB.Body).Decode(&claimedB) //nolint:errcheck
+	claimB.Body.Close()
+	ipB := patchTaskTo(t, srv, taskB.ID, "in_progress", claimedB.Version)
+	patchTaskTo(t, srv, taskB.ID, "done", ipB.Version)
+
+	time.Sleep(200 * time.Millisecond)
+
+	// CEO should now be notified.
+	mu.Lock()
+	snap := make([]string, len(ceoMessages))
+	copy(snap, ceoMessages)
+	mu.Unlock()
+
+	foundChain = false
+	for _, msg := range snap {
+		if strings.Contains(msg, "✅") && strings.Contains(msg, "任务链") {
+			foundChain = true
+		}
+	}
+	if !foundChain {
+		t.Errorf("CEO should have received chain complete notification, got: %v", snap)
+	}
+}
+
+func TestV8_TriggeredDispatch_WakesDownstream(t *testing.T) {
+	// Capture all sessions_send calls to verify downstream dispatch.
+	var mu sync.Mutex
+	var dispatched []string
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if args, ok := body["args"].(map[string]any); ok {
+			if key, ok := args["sessionKey"].(string); ok {
+				mu.Lock()
+				dispatched = append(dispatched, key)
+				mu.Unlock()
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	// Create A→B chain.
+	chainResp := postJSON(t, srv, "/dispatch/chain", map[string]any{
+		"tasks": []map[string]any{
+			{"title": "trigger-A", "assigned_to": "coder"},
+			{"title": "trigger-B", "assigned_to": "writer"},
+		},
+	})
+	var cr model.ChainResponse
+	json.NewDecoder(chainResp.Body).Decode(&cr) //nolint:errcheck
+	chainResp.Body.Close()
+	taskA := cr.Tasks[0]
+
+	// Clear captured dispatches (first one is from chain dispatch).
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	dispatched = nil
+	mu.Unlock()
+
+	// Drive A to done → should trigger dispatch to writer.
+	claimA := postJSON(t, srv, "/tasks/"+taskA.ID+"/claim",
+		map[string]any{"version": taskA.Version, "agent": "coder"})
+	var claimedA model.Task
+	json.NewDecoder(claimA.Body).Decode(&claimedA) //nolint:errcheck
+	claimA.Body.Close()
+	ipA := patchTaskTo(t, srv, taskA.ID, "in_progress", claimedA.Version)
+	patchTaskTo(t, srv, taskA.ID, "done", ipA.Version)
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify writer session was dispatched.
+	writerKey := "agent:writer:discord:channel:1475339585075548200"
+	mu.Lock()
+	snap := make([]string, len(dispatched))
+	copy(snap, dispatched)
+	mu.Unlock()
+
+	found := false
+	for _, key := range snap {
+		if key == writerKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("writer session should have been dispatched after A done, got: %v", snap)
 	}
 }
 

@@ -49,6 +49,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/dispatch/chain", h.handleDispatchChain)
 	mux.HandleFunc("/tasks", h.handleTasks)
 	mux.HandleFunc("/tasks/", h.handleTasksID)
+	mux.HandleFunc("/retry-routing", h.handleRetryRouting)
+	mux.HandleFunc("/retry-routing/", h.handleRetryRoutingID)
+	mux.HandleFunc("/chains/", h.handleChains)
 }
 
 // -------------------------------------------------------------------
@@ -166,11 +169,14 @@ func (h *Handler) handleDispatchChain(w http.ResponseWriter, r *http.Request) {
 			dependsOn = []string{created[i-1].ID}
 		}
 		task, err := h.store.CreateTask(model.CreateTaskRequest{
-			Title:          spec.Title,
-			AssignedTo:     spec.AssignedTo,
-			Description:    spec.Description,
-			RequiresReview: spec.RequiresReview,
-			DependsOn:      dependsOn,
+			Title:               spec.Title,
+			AssignedTo:          spec.AssignedTo,
+			Description:         spec.Description,
+			RequiresReview:      spec.RequiresReview,
+			Priority:            spec.Priority,
+			DependsOn:           dependsOn,
+			ChainID:             chainID,
+			NotifyCEOOnComplete: req.NotifyCEOOnComplete,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("create task[%d]: %v", i, err))
@@ -186,6 +192,7 @@ func (h *Handler) handleDispatchChain(w http.ResponseWriter, r *http.Request) {
 		Tasks:           created,
 		FirstDispatched: first.ID,
 	}
+	_ = req.ChainTitle // stored in tasks; not in ChainResponse currently
 
 	sessionKey, known := openclaw.SessionKey(first.AssignedTo)
 	if !known {
@@ -355,10 +362,48 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	// F6: async notification.
-	// done → Discord webhook (user @mention).
+	// done → Discord webhook (user @mention) + V8: triggered dispatch + chain complete check.
 	// failed → Discord webhook (user) + SessionNotifier (CEO session).
 	if task.Status == model.StatusDone {
 		notify.AsyncNotify(h.notifier, task)
+
+		// V8 triggered 缺口修复：遍历 triggered 任务，逐一唤醒下游专家 session。
+		if h.sessionN != nil && len(triggered) > 0 {
+			go func(ids []string) {
+				for _, tid := range ids {
+					downstream, err := h.store.GetByID(tid)
+					if err != nil {
+						log.Printf("[handler] triggered GetByID %s: %v", tid, err)
+						continue
+					}
+					if downstream.AssignedTo != "" {
+						h.sessionN.Dispatch(downstream.AssignedTo)
+					}
+				}
+			}(triggered)
+		}
+
+		// V8 chain complete：若整条链已完成且需要通知 CEO，发送汇总消息。
+		if task.ChainID != "" && task.NotifyCEOOnComplete && h.sessionN != nil {
+			go func(chainID string) {
+				complete, err := h.store.IsChainComplete(chainID)
+				if err != nil {
+					log.Printf("[handler] IsChainComplete chain=%s: %v", chainID, err)
+					return
+				}
+				if !complete {
+					return
+				}
+				chainTasks, err := h.store.GetChainTasks(chainID)
+				if err != nil {
+					log.Printf("[handler] GetChainTasks chain=%s: %v", chainID, err)
+					return
+				}
+				if err := h.sessionN.OnChainComplete(chainID, "", chainTasks); err != nil {
+					log.Printf("[handler] OnChainComplete chain=%s: %v", chainID, err)
+				}
+			}(task.ChainID)
+		}
 	}
 
 	var blockedDownstream []model.BlockedDownstream
@@ -386,6 +431,7 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 // Retry directive resolution (priority order):
 //  1. task.RetryAssignedTo field (set explicitly via PATCH body)
 //  2. failparser.ParseRetryAgent(task.Result) – legacy inline format
+//  3. retry_routing table lookup (GetRetryRoute by assigned_to + result keywords)
 //
 // If a retry agent is identified → auto-create retry task + dispatch (no CEO notify).
 // Otherwise → SessionNotifier alerts CEO for human intervention.
@@ -396,6 +442,14 @@ func (h *Handler) handleFailedTask(task model.Task) {
 		// Priority 2: inline result format (legacy/expert shorthand).
 		if retryAgent == "" {
 			retryAgent, _ = failparser.ParseRetryAgent(task.Result)
+		}
+		// Priority 3: retry_routing table lookup.
+		if retryAgent == "" && task.AssignedTo != "" {
+			if route, err := h.store.GetRetryRoute(task.AssignedTo, task.Result); err != nil {
+				log.Printf("[handler] GetRetryRoute for task %s: %v", task.ID, err)
+			} else {
+				retryAgent = route
+			}
 		}
 
 		if retryAgent != "" {
@@ -561,6 +615,109 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, model.ErrorResponse{Error: msg})
+}
+
+// -------------------------------------------------------------------
+// F11 (V8): /retry-routing
+// -------------------------------------------------------------------
+
+func (h *Handler) handleRetryRouting(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		routes, err := h.store.ListRetryRoutes()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"routes": routes, "count": len(routes)})
+	case http.MethodPost:
+		var req model.RetryRoute
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.AssignedTo) == "" || strings.TrimSpace(req.RetryAssignedTo) == "" {
+			writeError(w, http.StatusBadRequest, "assigned_to and retry_assigned_to are required")
+			return
+		}
+		route, err := h.store.CreateRetryRoute(req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, route)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleRetryRoutingID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	idStr := strings.TrimPrefix(r.URL.Path, "/retry-routing/")
+	if idStr == "" {
+		writeError(w, http.StatusBadRequest, "missing id")
+		return
+	}
+	var id int
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id: "+idStr)
+		return
+	}
+	if err := h.store.DeleteRetryRoute(id); err != nil {
+		handleStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// -------------------------------------------------------------------
+// F12 (V8): /chains/:chain_id
+// -------------------------------------------------------------------
+
+func (h *Handler) handleChains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	chainID := strings.TrimPrefix(r.URL.Path, "/chains/")
+	if chainID == "" {
+		writeError(w, http.StatusBadRequest, "missing chain_id")
+		return
+	}
+
+	tasks, err := h.store.GetChainTasks(chainID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(tasks) == 0 {
+		writeError(w, http.StatusNotFound, "chain not found")
+		return
+	}
+
+	complete, err := h.store.IsChainComplete(chainID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	doneCount := 0
+	for _, t := range tasks {
+		if t.Status == model.StatusDone || t.Status == model.StatusCancelled {
+			doneCount++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, model.ChainStatusResponse{
+		ChainID:    chainID,
+		Total:      len(tasks),
+		Done:       doneCount,
+		IsComplete: complete,
+		Tasks:      tasks,
+	})
 }
 
 // newChainID generates a unique chain identifier.

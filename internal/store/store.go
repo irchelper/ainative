@@ -35,9 +35,11 @@ func (s *Store) CreateTask(req model.CreateTaskRequest) (model.Task, error) {
 
 	_, err = tx.Exec(`
 		INSERT INTO tasks (id, title, description, status, assigned_to, retry_assigned_to,
+		                   chain_id, notify_ceo_on_complete,
 		                   parent_id, mode, requires_review, priority, version, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 		id, req.Title, req.Description, req.AssignedTo, req.RetryAssignedTo,
+		req.ChainID, boolToInt(req.NotifyCEOOnComplete),
 		req.ParentID, req.Mode, boolToInt(req.RequiresReview), req.Priority,
 		now, now)
 	if err != nil {
@@ -89,7 +91,8 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 		args = append(args, parentID)
 	}
 
-	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.superseded_by, t.parent_id,
+	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.superseded_by,
+	                 t.chain_id, t.notify_ceo_on_complete, t.parent_id,
 	                 t.mode, t.requires_review, t.result, t.failure_reason, t.version, t.priority, t.started_at, t.created_at, t.updated_at
 	          FROM tasks t
 	          WHERE ` + strings.Join(where, " AND ") + `
@@ -137,7 +140,8 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 // GetByID returns a single task with its depends_on list and history.
 func (s *Store) GetByID(id string) (model.Task, error) {
 	row := s.db.QueryRow(`
-		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by, parent_id,
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
+		       chain_id, notify_ceo_on_complete, parent_id,
 		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
@@ -236,7 +240,8 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 
 	// Fetch current task inside the transaction.
 	row := tx.QueryRow(`
-		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by, parent_id,
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
+		       chain_id, notify_ceo_on_complete, parent_id,
 		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks WHERE id = ?`, id)
 
@@ -413,6 +418,122 @@ func (s *Store) ScanBlockedDownstream(failedID string) ([]model.BlockedDownstrea
 }
 
 // -------------------------------------------------------------------
+// Chain helpers (V8)
+// -------------------------------------------------------------------
+
+// IsChainComplete returns true if all tasks in the chain are done/cancelled,
+// or their superseder is done (V7 superseded_by semantics).
+func (s *Store) IsChainComplete(chainID string) (bool, error) {
+	if chainID == "" {
+		return false, nil
+	}
+	var unfinished int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE chain_id = ?
+		  AND status NOT IN ('done', 'cancelled')
+		  AND (superseded_by = '' OR NOT EXISTS (
+		        SELECT 1 FROM tasks s WHERE s.id = superseded_by AND s.status = 'done'
+		      ))`, chainID).Scan(&unfinished)
+	if err != nil {
+		return false, fmt.Errorf("IsChainComplete: %w", err)
+	}
+	return unfinished == 0, nil
+}
+
+// GetChainTasks returns all tasks belonging to chainID, ordered by created_at.
+func (s *Store) GetChainTasks(chainID string) ([]model.Task, error) {
+	rows, err := s.db.Query(`
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
+		       chain_id, notify_ceo_on_complete, parent_id, mode,
+		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
+		FROM tasks WHERE chain_id = ?
+		ORDER BY created_at ASC`, chainID)
+	if err != nil {
+		return nil, fmt.Errorf("GetChainTasks: %w", err)
+	}
+	defer rows.Close()
+	var tasks []model.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
+// -------------------------------------------------------------------
+// retry_routing helpers (V8)
+// -------------------------------------------------------------------
+
+// GetRetryRoute queries the retry_routing table for a matching rule.
+// Priority: error_keyword match (priority DESC) > empty keyword (catch-all).
+// Returns ("", nil) when no rule matches.
+func (s *Store) GetRetryRoute(assignedTo, result string) (string, error) {
+	var retryAgent string
+	err := s.db.QueryRow(`
+		SELECT retry_assigned_to FROM retry_routing
+		WHERE assigned_to = ?
+		  AND (error_keyword = '' OR ? LIKE '%' || error_keyword || '%')
+		ORDER BY priority DESC
+		LIMIT 1`, assignedTo, result).Scan(&retryAgent)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("GetRetryRoute: %w", err)
+	}
+	return retryAgent, nil
+}
+
+// ListRetryRoutes returns all retry routing rules.
+func (s *Store) ListRetryRoutes() ([]model.RetryRoute, error) {
+	rows, err := s.db.Query(
+		`SELECT id, assigned_to, error_keyword, retry_assigned_to, priority FROM retry_routing ORDER BY assigned_to, priority DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("ListRetryRoutes: %w", err)
+	}
+	defer rows.Close()
+	var routes []model.RetryRoute
+	for rows.Next() {
+		var r model.RetryRoute
+		if err = rows.Scan(&r.ID, &r.AssignedTo, &r.ErrorKeyword, &r.RetryAssignedTo, &r.Priority); err != nil {
+			return nil, err
+		}
+		routes = append(routes, r)
+	}
+	return routes, rows.Err()
+}
+
+// CreateRetryRoute inserts a new retry routing rule.
+func (s *Store) CreateRetryRoute(r model.RetryRoute) (model.RetryRoute, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO retry_routing (assigned_to, error_keyword, retry_assigned_to, priority) VALUES (?, ?, ?, ?)`,
+		r.AssignedTo, r.ErrorKeyword, r.RetryAssignedTo, r.Priority)
+	if err != nil {
+		return model.RetryRoute{}, fmt.Errorf("CreateRetryRoute: %w", err)
+	}
+	id, _ := res.LastInsertId()
+	r.ID = int(id)
+	return r, nil
+}
+
+// DeleteRetryRoute deletes a rule by ID. Returns ErrNotFound if not found.
+func (s *Store) DeleteRetryRoute(id int) error {
+	res, err := s.db.Exec(`DELETE FROM retry_routing WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("DeleteRetryRoute: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// -------------------------------------------------------------------
 // Delete
 // -------------------------------------------------------------------
 
@@ -496,7 +617,8 @@ func (s *Store) Poll(assignedTo string) (*model.Task, error) {
 
 	// Phase 1: collect all candidate tasks (close cursor before deps check).
 	rows, err := s.db.Query(`
-		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by, parent_id, mode,
+		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
+		       chain_id, notify_ceo_on_complete, parent_id, mode,
 		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
 		FROM tasks
 		WHERE status = 'pending' AND assigned_to = ?
@@ -737,15 +859,17 @@ func scanTask(r *sql.Rows) (model.Task, error) {
 
 func scanTaskImpl(r taskScanner) (model.Task, error) {
 	var t model.Task
-	var rr int
+	var rr, notifyCEO int
 	err := r.Scan(&t.ID, &t.Title, &t.Description, (*string)(&t.Status),
-		&t.AssignedTo, &t.RetryAssignedTo, &t.SupersededBy, &t.ParentID, &t.Mode, &rr,
+		&t.AssignedTo, &t.RetryAssignedTo, &t.SupersededBy, &t.ChainID, &notifyCEO,
+		&t.ParentID, &t.Mode, &rr,
 		&t.Result, &t.FailureReason, &t.Version, &t.Priority,
 		&t.StartedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return model.Task{}, err
 	}
 	t.RequiresReview = rr != 0
+	t.NotifyCEOOnComplete = notifyCEO != 0
 	return t, nil
 }
 

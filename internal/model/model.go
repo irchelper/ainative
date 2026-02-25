@@ -19,23 +19,25 @@ const (
 
 // Task is the primary entity managed by agent-queue.
 type Task struct {
-	ID              string     `json:"id"`
-	Title           string     `json:"title"`
-	Description     string     `json:"description,omitempty"`
-	Status          Status     `json:"status"`
-	AssignedTo      string     `json:"assigned_to,omitempty"`
-	RetryAssignedTo string     `json:"retry_assigned_to,omitempty"`
-	SupersededBy    string     `json:"superseded_by,omitempty"`
-	ParentID        string     `json:"parent_id,omitempty"`
-	Mode            string     `json:"mode,omitempty"`
-	RequiresReview  bool       `json:"requires_review"`
-	Result          string     `json:"result,omitempty"`
-	FailureReason   string     `json:"failure_reason,omitempty"`
-	Version         int        `json:"version"`
-	Priority        int        `json:"priority"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                    string     `json:"id"`
+	Title                 string     `json:"title"`
+	Description           string     `json:"description,omitempty"`
+	Status                Status     `json:"status"`
+	AssignedTo            string     `json:"assigned_to,omitempty"`
+	RetryAssignedTo       string     `json:"retry_assigned_to,omitempty"`
+	SupersededBy          string     `json:"superseded_by,omitempty"`
+	ChainID               string     `json:"chain_id,omitempty"`
+	NotifyCEOOnComplete   bool       `json:"notify_ceo_on_complete,omitempty"`
+	ParentID              string     `json:"parent_id,omitempty"`
+	Mode                  string     `json:"mode,omitempty"`
+	RequiresReview        bool       `json:"requires_review"`
+	Result                string     `json:"result,omitempty"`
+	FailureReason         string     `json:"failure_reason,omitempty"`
+	Version               int        `json:"version"`
+	Priority              int        `json:"priority"`
+	StartedAt             *time.Time `json:"started_at,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 
 	// Populated by detail queries.
 	DependsOn []string      `json:"depends_on,omitempty"`
@@ -55,15 +57,17 @@ type HistoryItem struct {
 
 // CreateTaskRequest is the body for POST /tasks.
 type CreateTaskRequest struct {
-	Title           string   `json:"title"`
-	Description     string   `json:"description"`
-	AssignedTo      string   `json:"assigned_to"`
-	RetryAssignedTo string   `json:"retry_assigned_to"`
-	ParentID        string   `json:"parent_id"`
-	Mode            string   `json:"mode"`
-	RequiresReview  bool     `json:"requires_review"`
-	Priority        int      `json:"priority"`
-	DependsOn       []string `json:"depends_on"`
+	Title                 string   `json:"title"`
+	Description           string   `json:"description"`
+	AssignedTo            string   `json:"assigned_to"`
+	RetryAssignedTo       string   `json:"retry_assigned_to"`
+	ChainID               string   `json:"chain_id"`
+	NotifyCEOOnComplete   bool     `json:"notify_ceo_on_complete"`
+	ParentID              string   `json:"parent_id"`
+	Mode                  string   `json:"mode"`
+	RequiresReview        bool     `json:"requires_review"`
+	Priority              int      `json:"priority"`
+	DependsOn             []string `json:"depends_on"`
 }
 
 // PatchTaskRequest is the body for PATCH /tasks/:id.
@@ -147,7 +151,28 @@ type ChainTaskSpec struct {
 
 // ChainRequest is the body for POST /dispatch/chain.
 type ChainRequest struct {
-	Tasks []ChainTaskSpec `json:"tasks"`
+	Tasks                 []ChainTaskSpec `json:"tasks"`
+	NotifyCEOOnComplete   bool            `json:"notify_ceo_on_complete"`
+	ChainTitle            string          `json:"chain_title"`
+}
+
+// RetryRoute is a row from the retry_routing table.
+type RetryRoute struct {
+	ID              int    `json:"id"`
+	AssignedTo      string `json:"assigned_to"`
+	ErrorKeyword    string `json:"error_keyword"`
+	RetryAssignedTo string `json:"retry_assigned_to"`
+	Priority        int    `json:"priority"`
+}
+
+// ChainStatusResponse is returned by GET /chains/:chain_id.
+type ChainStatusResponse struct {
+	ChainID    string `json:"chain_id"`
+	ChainTitle string `json:"chain_title,omitempty"`
+	Total      int    `json:"total"`
+	Done       int    `json:"done"`
+	IsComplete bool   `json:"is_complete"`
+	Tasks      []Task `json:"tasks"`
 }
 
 // ChainResponse is returned by POST /dispatch/chain.

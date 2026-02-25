@@ -1,6 +1,6 @@
 # agent-queue 架构说明
 
-> 版本：v7 | 更新：2026-02-26 | 代码基线：commit `7610e5e` + V7 superseded_by
+> 版本：v8 | 更新：2026-02-26 | 代码基线：commit `6d56b5d` + V8 chain通知+retry_routing+triggered修复
 > 对应 PRD：`PRD.md`
 
 ---
@@ -34,30 +34,48 @@ Go server（PATCH done 触发）：
   1. SQLite 写入 done
   2. unlockDependents → B 的 deps_met=true
   3. Discord webhook → @康熙（用户审计）
-  4. sessions_send → 专家 B session（唤醒下游）
+  4. sessions_send → 专家 B session（唤醒下游）    ← V8 修复：triggered 缺口（原代码未实现此步骤）
+  5. [V8] 若 task.chain_id != "" && task.notify_ceo_on_complete:
+       IsChainComplete(chain_id) → 全部 done/cancelled/superseded
+         → SessionNotifier.OnChainComplete(chain_id, chain_title, tasks)
   ↓
 专家 B session 启动 → poll → claim → ... → PATCH done
   ↓
 ... 链路自动流转至终点 ...
   ↓
 最后一个 PATCH done → Discord webhook @康熙
+                    → [V8 若 notify_ceo_on_complete=true] SessionNotifier.OnChainComplete → CEO session
 ```
+
+**⚠️ triggered 下游唤醒缺口（V8 修复）：**
+
+ARCH.md §2 一直写着"sessions_send → 专家 B session（唤醒下游）"，但 commit `6d56b5d` 对应代码中 `handler.go` 的 `patchTask` 函数：
+- `unlockDependents` 确实返回了 `triggered` 列表
+- 但 handler **未遍历 triggered 调用 SessionNotifier 唤醒下游专家**
+- 导致串行链依赖自动解锁后，下游专家 session 不会被唤醒，必须靠专家自己 startup poll 才能感知
+
+**V8 修复方案：** `patchTask` done 分支在 `unlockDependents` 返回 triggered 列表后，遍历每个 triggered 任务，调用 `SessionNotifier.Dispatch(assignedTo, taskID)` 唤醒对应专家 session。
 
 ### 异常路径（failed）
 
 ```
 专家 X 执行中遇到无法解决的问题
   ↓
-PATCH /tasks/:id  status=failed, result="原因 | retry_assigned_to: Y"
+PATCH /tasks/:id  status=failed, result="原因"（或含 "| retry_assigned_to: Y"）
   ↓
-Go server 解析 result：
-  ├── 有 retry_assigned_to → autoRetry（见下）
-  └── 无 retry_assigned_to → SessionNotifier 唤醒 CEO session（人工决策）
+Go server V8 retry 路由优先级链：
+  1. PATCH body 显式传 retry_assigned_to → 直接用
+  2. failparser 从 result 解析 "| retry_assigned_to: Y" → 用
+  3. 查 retry_routing 表（按 error_keyword + priority） → 命中则用
+  4. 全部未命中 → SessionNotifier 唤醒 CEO session（人工决策）
+  ↓
+步骤 1-3 命中（有退单目标）→ autoRetry（见下）
+步骤 4（无退单目标）→ SessionNotifier CEO
   ↓
 同时：Discord webhook → @康熙（❌ 格式，含 blocked_downstream 列表）
 ```
 
-**autoRetry V7 行为（有 retry_assigned_to 时）：**
+**autoRetry V8 行为（有 retry_assigned_to 时）：**
 
 | 步骤 | 操作 | 说明 |
 |------|------|------|
@@ -257,13 +275,30 @@ task_id: {id}
 
 含 task_id 是因为 CEO 需要知道哪个任务失败了才能决策。CEO 不会把这个误当任务执行（消息开头有 `[agent-queue]` 前缀，且带 task_id）。
 
+### 链路完成通知消息（→ CEO session，V8 新增）
+
+```
+[agent-queue] ✅ 任务链完成：{chain_title 或 "链路 chain_id"}
+完成任务数：{done_count}/{total_count}
+链路任务：
+  ✅ {task1.title} ({task1.assigned_to}) — {task1.result}
+  ✅ {task2.title} ({task2.assigned_to}) — {task2.result}
+  ✅ {task3.title} ({task3.assigned_to}) — {task3.result}
+chain_id: {chain_id}
+```
+
+**触发条件：** 链内任意任务 PATCH done 时，若 `chain_id != "" && notify_ceo_on_complete=true`，server 调 `IsChainComplete(chain_id)`，确认全链完成后触发 `OnChainComplete`。
+
+**设计：** 与 dispatch 极简格式不同，链路完成消息含完整子任务结果——因为 CEO 此时是"结果汇总者"角色，需要知道每步的 result 才能决定下一阶段。
+
 ### SessionNotifier 发送目标原则
 
 - 每个事件**只发给需要知道的 1 个 session**，不广播
 - dispatch 新任务 → 目标专家 session
 - dispatch/chain → 链中第一个专家
-- done 触发下游解锁 → 下游专家 session（自动唤醒）
+- done 触发下游解锁 → 下游专家 session（自动唤醒，V8 triggered 缺口修复）
 - failed 需 CEO 介入 → CEO session
+- chain 全部完成（notify_ceo_on_complete=true） → CEO session（V8 新增）
 
 ---
 
@@ -274,8 +309,9 @@ task_id: {id}
 | 事件 | CEO 如何感知 |
 |------|------------|
 | 任务 done | 不直接感知（串行链靠 Go server 自动推进，不需要 CEO）|
-| 任务 failed（有 retry_assigned_to） | 不感知（自动退单，Go server 处理）|
-| 任务 failed（无 retry_assigned_to） | SessionNotifier 唤醒 CEO session |
+| 任务 failed（有 retry_assigned_to，含 retry_routing 表命中） | 不感知（自动退单，Go server 处理）|
+| 任务 failed（无 retry_assigned_to 且 retry_routing 无匹配） | SessionNotifier 唤醒 CEO session |
+| 链路全部完成（notify_ceo_on_complete=true）[V8] | SessionNotifier.OnChainComplete 唤醒 CEO session，含完整子任务结果 |
 | 用户可见通知 | Discord webhook（done / failed 均有，用于审计）|
 | session 启动时 | CEO 主动调 `GET /tasks/summary` 掌握全局 |
 
@@ -421,6 +457,52 @@ type Notifier interface {
 
 按数组顺序创建任务，`task[i].depends_on = [task[i-1].id]`，形成 A→B→C 串行链。返回所有子任务对象。
 
+**V8 新增请求体字段：**
+
+```json
+{
+  "tasks": [...],
+  "notify_ceo_on_complete": true,   // V8 新增：链路全部完成时是否 SessionNotifier 唤醒 CEO（默认 false）
+  "chain_title": "需求→设计→实现"   // V8 新增：链路名称，用于 CEO 通知消息中展示（可选）
+}
+```
+
+**行为：** `notify_ceo_on_complete` 写入链内所有任务的 `notify_ceo_on_complete` 列；`chain_id` 由 server 自动生成写入全链任务。向后兼容：旧请求不传这两个字段，行为不变（不通知 CEO）。
+
+### F11（V8 新增）：GET/POST/DELETE /retry-routing（retry 路由表管理）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/retry-routing` | 查询全部 retry 路由规则 |
+| `POST` | `/retry-routing` | 添加新规则（assigned_to + error_keyword + retry_assigned_to + priority） |
+| `DELETE` | `/retry-routing/:id` | 删除规则 |
+
+**用途：** 在线调整 retry 路由，无需重启 server。初始数据（9 专家映射）在 server 启动时 seed。
+
+### F12（V8 新增，可选）：GET /chains/:chain_id
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/chains/:chain_id` | 查询某条链路的所有任务状态 |
+
+**响应示例：**
+```json
+{
+  "chain_id": "chain_1706271600_abc123",
+  "chain_title": "需求→设计→实现",
+  "total": 3,
+  "done": 2,
+  "is_complete": false,
+  "tasks": [
+    {"id": "xxx", "title": "A任务", "status": "done", "assigned_to": "pm", "result": "..."},
+    {"id": "yyy", "title": "B任务", "status": "done", "assigned_to": "thinker", "result": "..."},
+    {"id": "zzz", "title": "C任务", "status": "in_progress", "assigned_to": "coder", "result": ""}
+  ]
+}
+```
+
+**用途：** CEO 或用户查询整条链路进度，无需逐个查子任务。
+
 ---
 
 ## 数据库 Schema
@@ -434,6 +516,10 @@ tasks (
   superseded_by TEXT NOT NULL DEFAULT '',  -- retry 替代链指针：autoRetry 创建 X' 后，X.superseded_by = X'.id
                                            -- depsMetForID 扩展判断：dep 自己 done OR dep.superseded_by 对应任务 done
                                            -- failed→pending CEO 重试时必须清空此字段（防双重解锁冲突）
+  chain_id TEXT NOT NULL DEFAULT '',       -- V8 新增：任务所属链路标识（dispatch/chain 自动填入）
+                                           -- 格式：`chain_{timestamp}_{rand}` 或空字符串（非链路任务）
+  notify_ceo_on_complete INTEGER NOT NULL DEFAULT 0,  -- V8 新增：链路完成时是否通知 CEO
+                                                       -- dispatch/chain 的 notify_ceo_on_complete=true 时全链任务都置 1
   parent_id, mode, requires_review,
   result,                         -- done 时写摘要，failed 时写失败原因（支持 "原因 | retry_assigned_to: X" 格式）
   version, started_at, created_at, updated_at
@@ -444,6 +530,41 @@ task_deps (task_id, depends_on_task_id)
 
 -- 状态变更历史
 task_history (id, task_id, from_status, to_status, changed_by, note, changed_at)
+
+-- V8 新增：retry 路由表（服务端自动查表，替代 SOUL.md 硬编码映射）
+retry_routing (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  assigned_to TEXT NOT NULL,      -- 遇到问题的专家（from）
+  error_keyword TEXT NOT NULL DEFAULT '',  -- 匹配 result 中的关键词（空=匹配所有）
+  retry_assigned_to TEXT NOT NULL,         -- 退单目标（to）
+  priority INTEGER NOT NULL DEFAULT 0      -- 同 assigned_to 多条规则时的优先级（高优先）
+)
+
+-- retry_routing 初始数据（9专家映射，基于 F12 退单合同）
+INSERT INTO retry_routing (assigned_to, error_keyword, retry_assigned_to, priority) VALUES
+  ('qa',      'bug',        'coder',   10),
+  ('qa',      'ui',         'uiux',    10),
+  ('qa',      '',           'coder',    0),   -- 兜底：qa 退单默认给 coder
+  ('coder',   '架构',        'thinker', 10),
+  ('coder',   '需求',        'pm',      10),
+  ('coder',   '',           'thinker',  0),   -- 兜底：coder 退单默认给 thinker
+  ('writer',  '',           'pm',       0),
+  ('devops',  'bug',        'coder',   10),
+  ('devops',  '架构',        'thinker', 10),
+  ('devops',  '',           'coder',    0),   -- 兜底：devops 退单默认给 coder
+  ('thinker', '',           'writer',   0),
+  ('uiux',    '',           'pm',       0);
+```
+
+**retry_routing 查表优先级链：**
+
+```
+1. PATCH body 显式传 retry_assigned_to → 直接用
+2. failparser 从 result 解析 "| retry_assigned_to: X" → 用
+3. 查 retry_routing 表：SELECT retry_assigned_to FROM retry_routing
+     WHERE assigned_to = ? AND (error_keyword = '' OR result LIKE '%' || error_keyword || '%')
+     ORDER BY priority DESC LIMIT 1
+4. 无匹配 → SessionNotifier 唤醒 CEO（人工决策）
 ```
 
 ---
@@ -453,7 +574,7 @@ task_history (id, task_id, from_status, to_status, changed_by, note, changed_at)
 | 层 | 选型 | 说明 |
 |----|------|------|
 | **存储** | SQLite（WAL 模式） | 单文件，零部署，ACID 事务，WAL 支持并发读写 |
-| **API 服务** | Go `net/http`（无框架） | 单二进制；handler ~540行 + store ~690行 |
+| **API 服务** | Go `net/http`（无框架） | 单二进制；handler ~540行 + store ~690行；V8 新增 retry_routing store + chain complete 检查 |
 | **通知** | Discord Incoming Webhook + OpenClaw sessions_send | 双通道：webhook=用户审计，sessions_send=agent感知 |
 | **并发控制** | 乐观锁（`version` 字段） | `WHERE version = ? AND status = 'pending'` 原子更新 |
 | **部署** | launchd（macOS）/ systemd（Linux）| KeepAlive，进程崩溃自动重启 |
@@ -519,6 +640,10 @@ export AGENT_QUEUE_DB_PATH="/Users/kangxi/clawd/agent-queue/data/queue.db"
 - **为什么 autoRetry 解析 result 字段：** 专家发现问题时自然语言描述失败原因，在同一字段内用 `| retry_assigned_to: X` 声明退单目标，保持接口简单，无需新增字段
 - **为什么选 `superseded_by` 而非修改 task_deps：** 修改 task_deps 会丢失原始依赖历史，且需要在事务中原子完成多表更新；`superseded_by` 只新增一列，不改现有数据，历史完整，依赖链语义不变
 - **为什么 `blocked_downstream` 是只读扫描而非主动冻结：** 下游任务天然被 `deps_met=false` 屏蔽（A not done → B 依赖未满足 → poll 不返回 B），无需主动冻结；只读扫描提供可观测性，不引入新状态转换复杂度
+- **[V8] 为什么 chain_id 不建 chain 表：** chain_id 是分组标签（`chain_{timestamp}_{rand}`），存在 tasks 表即可；chain 表增加 JOIN 复杂度，无实质收益；`GET /chains/:chain_id` 直接 `SELECT * FROM tasks WHERE chain_id = ?` 实现
+- **[V8] 为什么 notify_ceo_on_complete 标记在每个任务而非只标记链尾：** autoRetry 可替换链中任意任务，如只标记链尾，retry 任务不继承标记；全链任务都标记后，任何任务 done 时统一检查 IsChainComplete，逻辑一致
+- **[V8] 为什么 retry_routing 在 SQLite 表而非 SOUL.md 硬编码：** SOUL.md 是 prompt 文件，修改退单规则需重部署 9 个专家；Go server 动态查表，在线 CRUD `/retry-routing`，无需重启；且从 SOUL.md 中删除 15-20 行映射规则，降低每次 session 的 context 成本
+- **[V8] triggered 缺口为何存在：** unlockDependents 早期设计只是"解锁依赖"，返回 triggered 列表供响应体展示；SessionNotifier 唤醒下游专家的逻辑被遗漏，导致串行链依赖解锁后下游专家不会自动被唤醒。V8 修复：patchTask done 分支遍历 triggered，逐一调 SessionNotifier.Dispatch
 
 ---
 
