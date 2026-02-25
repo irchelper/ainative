@@ -301,6 +301,28 @@ type Notifier interface {
 
 **架构决策：** v3 的"Go server 不做通知"原则在 v4 修订——Go server 通过 Incoming Webhook（HTTP POST 一个 URL）发通知是轻量级集成，不等同于 import Discord SDK。Incoming Webhook 是平台无关的 HTTP 调用，任何支持 webhook 的平台都能接入。
 
+### F7: POST /dispatch（原子化派发接口）
+
+| 功能 | 描述 | 优先级 |
+|------|------|--------|
+| 原子派发 | 一步完成"建任务 + 触发专家 session"，替代 POST /tasks + sessions_send 两步 | P0 |
+| 优雅降级 | sessions_send 失败时任务仍创建，响应含 `notified=false` + `notify_error` | P0 |
+| OpenClaw 集成 | 通过环境变量 `AGENT_QUEUE_OPENCLAW_API_URL` / `AGENT_QUEUE_OPENCLAW_API_KEY` 配置 | P0 |
+
+**行为：** 创建 SQLite 任务记录（status=pending）→ 调用 OpenClaw `/tools/invoke`（sessions_send）→ 返回 task + notified 状态。
+
+**专家 session key 映射：** 已硬编码在 Go server `internal/openclaw` 包中。
+
+**Gateway 配置前提：** `openclaw.json` gateway 节点需开放 `tools.allow: ["sessions_send"]`。
+
+### F8: GET /tasks/summary（全局状态面板）
+
+| 功能 | 描述 | 优先级 |
+|------|------|--------|
+| 全局状态 | 返回 pending/claimed/in_progress/done_today 计数 | P0 |
+| 任务列表 | 返回所有非 done 任务（按 updated_at 倒序） | P0 |
+| CEO 启动集成 | CEO session 启动时一次调用替代逐个查询，掌握全局进度 | P1 |
+
 ---
 
 ## 6. 非功能需求

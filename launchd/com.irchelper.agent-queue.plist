@@ -33,6 +33,10 @@
         <string>https://discord.com/api/webhooks/1476188831311986719/YtAzF3zHf7R6Ru6F3HVfrO5hLWVgGSCumZx0pTp0ErEJLFhkGuILAbJOoHW0Bgou7Iwo</string>
         <key>AGENT_QUEUE_DISCORD_USER_ID</key>
         <string>1475329182878928937</string>
+        <key>AGENT_QUEUE_OPENCLAW_API_URL</key>
+        <string>http://localhost:18789</string>
+        <key>AGENT_QUEUE_OPENCLAW_API_KEY</key>
+        <string>1e575a589cefecefdf4cfe5bc6fdf56f60f75a540c8904e8</string>
     </dict>
 </dict>
 </plist>

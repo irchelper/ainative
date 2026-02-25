@@ -110,6 +110,37 @@ claimed → pending                              （释放认领）
 - 环境变量：`AGENT_QUEUE_DISCORD_WEBHOOK_URL`（未配置时 no-op + log.Info）
 - 失败处理：重试 1 次，最终失败记 error log，不阻塞状态变更
 
+### F7：POST /dispatch（原子化派发）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/dispatch` | 一步完成"建任务 + 触发专家 session"，替代 POST /tasks + sessions_send 两步 |
+
+**行为流程：**
+1. 创建 SQLite 任务记录（status=pending）
+2. 调用 OpenClaw `/tools/invoke`（sessions_send）触发专家 session
+3. 返回 task 对象 + `notified` 状态
+
+**优雅降级：** sessions_send 失败时任务仍创建成功，响应含 `notified=false` + `notify_error` 字段，不阻断任务创建。
+
+**环境变量：**
+- `AGENT_QUEUE_OPENCLAW_API_URL`（默认 `http://localhost:18789`）
+- `AGENT_QUEUE_OPENCLAW_API_KEY`（OpenClaw gateway token）
+
+**专家 session key 映射：** 已硬编码在 Go server `internal/openclaw` 包中（agent name → sessionKey）。
+
+### F8：GET /tasks/summary（全局状态面板）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/tasks/summary` | CEO 启动时一次调用获取全局任务状态 |
+
+**响应结构：**
+- 计数：`pending` / `claimed` / `in_progress` / `done_today`
+- 非 done 任务列表（按 `updated_at` 倒序）
+
+**用途：** 替代 CEO 逐个查询任务状态，session 启动时一次调用即可掌握全局进度。
+
 ---
 
 ## CEO 集成说明
@@ -179,9 +210,43 @@ go build -o agent-queue .
 
 # 环境变量（可选）
 export AGENT_QUEUE_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+export AGENT_QUEUE_OPENCLAW_API_URL="http://localhost:18789"
+export AGENT_QUEUE_OPENCLAW_API_KEY="<gateway_token>"
 ```
 
 **持久化运行：** 配合 launchd（macOS）或 systemd（Linux）设置 KeepAlive，进程崩溃自动重启，状态不丢失（SQLite 持久化）。
+
+## 部署配置
+
+### OpenClaw Gateway 配置（F7 /dispatch 依赖）
+
+在 `openclaw.json` 的 gateway 节点添加 tools 权限：
+
+```json
+{
+  "gateway": {
+    "tools": {
+      "allow": ["sessions_send"]
+    }
+  }
+}
+```
+
+### launchd plist 环境变量配置
+
+F7 `/dispatch` 调用 OpenClaw API，需在 launchd plist 中配置：
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>AGENT_QUEUE_OPENCLAW_API_URL</key>
+  <string>http://localhost:<gateway_port></string>
+  <key>AGENT_QUEUE_OPENCLAW_API_KEY</key>
+  <string><gateway_token></string>
+</dict>
+```
+
+**未配置时：** `/dispatch` 接口任务仍可创建，`notified=false`，降级行为与 `POST /tasks` 相同。
 
 ---
 
