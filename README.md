@@ -51,6 +51,46 @@ curl -s -X POST localhost:19827/tasks/$A/claim \
   -d "{\"version\":$VER,\"agent\":\"coder\"}"
 ```
 
+## 部署（macOS launchd）
+
+### 1. 填写环境变量
+
+编辑 `launchd/com.irchelper.agent-queue.plist`，填入实际值：
+
+```xml
+<key>AGENT_QUEUE_DISCORD_WEBHOOK_URL</key>
+<string>https://discord.com/api/webhooks/...</string>
+<key>AGENT_QUEUE_DISCORD_USER_ID</key>
+<string>你的 Discord 用户 ID</string>
+```
+
+### 2. 安装并启动服务
+
+```bash
+make build                        # 确保编译产物是最新的
+bash scripts/launchd-install.sh   # 安装 launchd service 并启动
+```
+
+### 3. 验证
+
+```bash
+launchctl list | grep agent-queue           # 应显示 PID
+curl http://localhost:19827/health          # 应返回 {"status":"ok"}
+tail -f ~/Library/Logs/agent-queue/stdout.log
+```
+
+### 4. 卸载
+
+```bash
+bash scripts/launchd-uninstall.sh
+```
+
+### 注意事项
+
+- 服务崩溃后 launchd 会自动重启（`KeepAlive: true`）
+- 修改 plist 后需要 `launchctl unload` + `launchctl load` 才能生效
+- 日志目录：`~/Library/Logs/agent-queue/`
+
 ## 开发
 
 ```bash
