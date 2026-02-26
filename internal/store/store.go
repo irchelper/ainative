@@ -367,6 +367,19 @@ func (s *Store) SetSupersededBy(originalID, retryID string) error {
 	return nil
 }
 
+// UpdateSupersededByChain updates all tasks whose superseded_by = oldTargetID
+// to point to newTargetID. Used by multi-level review-reject chains to ensure
+// depsMetForID follows the latest re-review task, not the stale one.
+func (s *Store) UpdateSupersededByChain(oldTargetID, newTargetID string) error {
+	_, err := s.db.Exec(
+		`UPDATE tasks SET superseded_by = ?, updated_at = ? WHERE superseded_by = ?`,
+		newTargetID, time.Now().UTC(), oldTargetID)
+	if err != nil {
+		return fmt.Errorf("UpdateSupersededByChain: %w", err)
+	}
+	return nil
+}
+
 // ScanBlockedDownstream returns all pending/claimed tasks that (directly or
 // indirectly) depend on failedID. This is a read-only scan; no state is
 // modified.

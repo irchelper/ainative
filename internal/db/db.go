@@ -90,6 +90,12 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("seed retry_routing: %w", err)
 	}
 
+	// Incremental retry_routing migrations (INSERT OR IGNORE — idempotent for existing instances).
+	if err = addRetryRoutingRules(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("add retry_routing rules: %w", err)
+	}
+
 	return db, nil
 }
 
@@ -126,6 +132,33 @@ func seedRetryRouting(db *sql.DB) error {
 	for _, r := range rules {
 		_, err := db.Exec(
 			`INSERT INTO retry_routing (assigned_to, error_keyword, retry_assigned_to, priority) VALUES (?, ?, ?, ?)`,
+			r.assignedTo, r.errorKeyword, r.retryAssignedTo, r.priority)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addRetryRoutingRules inserts incremental routing rules using INSERT OR IGNORE (idempotent).
+// Use this for rules added after the initial seed — safe to run on every startup.
+func addRetryRoutingRules(db *sql.DB) error {
+	// P2 审核链路退单规则（2026-02-26）
+	// thinker REQUEST_CHANGES: 代码问题退 coder，文档问题退 writer
+	// security REQUEST_CHANGES: 退 coder（兜底）
+	p2Rules := []struct {
+		assignedTo      string
+		errorKeyword    string
+		retryAssignedTo string
+		priority        int
+	}{
+		{"thinker", "代码", "coder", 10},
+		{"thinker", "文档", "writer", 10},
+		{"security", "", "coder", 0},
+	}
+	for _, r := range p2Rules {
+		_, err := db.Exec(
+			`INSERT OR IGNORE INTO retry_routing (assigned_to, error_keyword, retry_assigned_to, priority) VALUES (?, ?, ?, ?)`,
 			r.assignedTo, r.errorKeyword, r.retryAssignedTo, r.priority)
 		if err != nil {
 			return err

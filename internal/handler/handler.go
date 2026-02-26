@@ -577,8 +577,12 @@ func (h *Handler) handleFailedTask(task model.Task) {
 	}()
 }
 
-// autoRetry creates a new task for the retry agent and dispatches it.
+// autoRetry creates retry task(s) for the retry agent and dispatches.
 // V7: retry task inherits original.DependsOn; original.superseded_by is set to retry task ID.
+// V10: if the original task was assigned to a reviewer (thinker/security) and the retry
+//      agent is different, a two-stage chain is created:
+//      fix task (retryAgent) → re-review task (original.AssignedTo)
+//      superseded_by points to the re-review task so downstream deps wait for re-approval.
 // Per spec: does NOT notify CEO.
 func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 	failureDesc := original.FailureReason
@@ -586,19 +590,33 @@ func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 		failureDesc = original.Result
 	}
 
-	// Fetch original task details to get DependsOn (may not be populated in task passed in).
+	// Fetch original task details to get DependsOn/ChainID/NotifyCEOOnComplete.
 	origDetail, err := h.store.GetByID(original.ID)
 	if err != nil {
 		log.Printf("[handler] autoRetry: GetByID original %s failed: %v", original.ID, err)
 		origDetail = original // fallback
 	}
 
+	// V10: detect review-reject scenario.
+	// A review reject occurs when the original task was performed by a reviewer
+	// (thinker/security) and the retry is directed to a different agent (the implementer).
+	isReviewReject := original.AssignedTo != retryAgent &&
+		(original.AssignedTo == "thinker" || original.AssignedTo == "security")
+
+	if isReviewReject {
+		h.autoRetryReviewReject(original, origDetail, retryAgent, failureDesc)
+		return
+	}
+
+	// Standard single-task retry (existing behaviour).
 	newTask, err := h.store.CreateTask(model.CreateTaskRequest{
-		Title:       "retry: " + original.Title,
-		AssignedTo:  retryAgent,
-		Priority:    original.Priority,
-		Description: "failed原因: " + failureDesc,
-		DependsOn:   origDetail.DependsOn, // V7: inherit original deps
+		Title:               "retry: " + original.Title,
+		AssignedTo:          retryAgent,
+		Priority:            original.Priority,
+		Description:         "failed原因: " + failureDesc,
+		DependsOn:           origDetail.DependsOn,           // V7: inherit original deps
+		ChainID:             origDetail.ChainID,             // V8: propagate chain membership
+		NotifyCEOOnComplete: origDetail.NotifyCEOOnComplete, // V8: propagate notification flag
 	})
 	if err != nil {
 		log.Printf("[handler] autoRetry CreateTask failed for original %s: %v", original.ID, err)
@@ -613,10 +631,73 @@ func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 			original.ID, newTask.ID, err)
 	}
 
-	// Dispatch to expert session (no CEO notification per spec).
-	sessionKey, known := openclaw.SessionKey(retryAgent)
+	h.dispatchToAgent(retryAgent, newTask.ID)
+}
+
+// autoRetryReviewReject handles the V10 review-reject case.
+// Creates a two-stage chain: fix task → re-review task.
+// superseded_by of the original review task points to the re-review task,
+// so downstream deps (e.g. qa) wait until re-review passes.
+func (h *Handler) autoRetryReviewReject(original, origDetail model.Task, retryAgent, failureDesc string) {
+	// Stage 1: fix task (assigned to the implementer, e.g. coder/writer).
+	fixTask, err := h.store.CreateTask(model.CreateTaskRequest{
+		Title:               "fix: " + original.Title,
+		AssignedTo:          retryAgent,
+		Priority:            original.Priority,
+		Description:         "审核退单修改意见:\n" + failureDesc,
+		DependsOn:           origDetail.DependsOn,           // inherit original reviewer's deps (e.g. C1)
+		ChainID:             origDetail.ChainID,
+		NotifyCEOOnComplete: origDetail.NotifyCEOOnComplete,
+	})
+	if err != nil {
+		log.Printf("[handler] autoRetry(review-reject) CreateTask fix failed for original %s: %v", original.ID, err)
+		return
+	}
+	log.Printf("[handler] autoRetry(review-reject): created fix task %s for agent %s (original: %s)",
+		fixTask.ID, retryAgent, original.ID)
+
+	// Stage 2: re-review task (assigned back to the original reviewer, e.g. thinker/security).
+	reReviewTask, err := h.store.CreateTask(model.CreateTaskRequest{
+		Title:               "re-review: " + original.Title,
+		AssignedTo:          original.AssignedTo, // thinker/security — the original reviewer
+		Priority:            original.Priority,
+		Description:         "重新审核修复后的实现。原退单意见:\n" + failureDesc,
+		DependsOn:           []string{fixTask.ID}, // depends on the fix being completed first
+		ChainID:             origDetail.ChainID,
+		NotifyCEOOnComplete: origDetail.NotifyCEOOnComplete,
+	})
+	if err != nil {
+		log.Printf("[handler] autoRetry(review-reject) CreateTask re-review failed (fix %s): %v", fixTask.ID, err)
+		return
+	}
+	log.Printf("[handler] autoRetry(review-reject): created re-review task %s for agent %s",
+		reReviewTask.ID, original.AssignedTo)
+
+	// Multi-level reject handling: update any existing superseded_by pointers
+	// that pointed at original.ID to now point at reReviewTask.ID.
+	// This handles the case where a prior re-review also failed and created new fix/re-review tasks.
+	if err := h.store.UpdateSupersededByChain(original.ID, reReviewTask.ID); err != nil {
+		log.Printf("[handler] autoRetry UpdateSupersededByChain failed: %v", err)
+	}
+
+	// superseded_by of the original review task points to the re-review task (not the fix task).
+	// This way, depsMetForID for downstream tasks (e.g. qa) waits for re-review to pass.
+	if err := h.store.SetSupersededBy(original.ID, reReviewTask.ID); err != nil {
+		log.Printf("[handler] autoRetry SetSupersededBy failed (original %s → re-review %s): %v",
+			original.ID, reReviewTask.ID, err)
+	}
+
+	// Dispatch only the fix task; re-review will be dispatched automatically
+	// when fix task reaches 'done' (unlockDependents → triggered → SessionNotifier.Dispatch).
+	h.dispatchToAgent(retryAgent, fixTask.ID)
+}
+
+// dispatchToAgent sends a sessions_send nudge to the agent owning taskID.
+// Fire-and-forget; errors are logged only.
+func (h *Handler) dispatchToAgent(agentName, taskID string) {
+	sessionKey, known := openclaw.SessionKey(agentName)
 	if !known {
-		log.Printf("[handler] autoRetry: unknown agent %q – task %s created but not dispatched", retryAgent, newTask.ID)
+		log.Printf("[handler] dispatchToAgent: unknown agent %q – task %s created but not dispatched", agentName, taskID)
 		return
 	}
 	if h.oc == nil {
@@ -624,9 +705,9 @@ func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 	}
 	msg := "[agent-queue] 你有新的待处理任务。请执行 poll 流程认领。"
 	if err := h.oc.SendToSession(sessionKey, msg); err != nil {
-		log.Printf("[handler] autoRetry dispatch to %s failed: %v", sessionKey, err)
+		log.Printf("[handler] dispatchToAgent %s failed: %v", sessionKey, err)
 	} else {
-		log.Printf("[handler] autoRetry dispatched task %s to %s", newTask.ID, retryAgent)
+		log.Printf("[handler] dispatchToAgent: dispatched task %s to %s", taskID, agentName)
 	}
 }
 

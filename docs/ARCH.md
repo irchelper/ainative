@@ -762,3 +762,40 @@ curl -X POST http://localhost:19827/tasks \
 - 没有任何专家的 SOUL.md 配置了 `assigned_to=test`，测试任务不会被自驱 claim
 - 验证完成后手动 PATCH 为 failed（或等 server 重启清空）
 - 禁止用真实专家名创建测试任务，避免干扰专家自驱队列
+
+---
+
+## 标准任务链路
+
+### 代码任务标准链路
+
+代码类任务统一使用三段串行链路，通过 `POST /dispatch/chain` 一次提交：
+
+```bash
+curl -X POST http://localhost:19827/dispatch/chain \
+  -H "Content-Type: application/json" \
+  -d '{
+    "chain_title": "实现[功能名]",
+    "notify_ceo_on_complete": true,
+    "tasks": [
+      {"title": "实现[功能]",   "assigned_to": "coder",  "description": "..."},
+      {"title": "QA测试[功能]", "assigned_to": "qa",     "description": "..."},
+      {"title": "reload",       "assigned_to": "devops", "description": "launchd reload + 健康检查"}
+    ]
+  }'
+```
+
+**各节点职责：**
+
+| 节点 | 执行者 | 验收标准 | 失败行为 |
+|------|--------|---------|---------|
+| 实现 | coder | 编译通过 + lint 无 error；测试文件不得新建/修改 | 架构/需求问题退单 thinker/pm |
+| QA gate | qa | 编写/补写测试，全部通过 | 测试失败退单 coder（含失败原因+预期行为）|
+| reload | devops | launchd reload + 健康检查通过 | 部署失败退单 coder/thinker |
+
+**QA gate 是硬性卡点：** qa 任务依赖 coder 任务（`depends_on`），只有 coder PATCH done 后 qa 才能被 poll 到。qa 测试全通过才 PATCH done，触发 devops 解锁。测试失败则 PATCH failed + `retry_assigned_to: coder`，自动退单，devops 不会被解锁。
+
+**coder 验收规则（不跑测试）：**
+- ✅ 编译通过 + lint 无 error = 验收通过
+- 若现有测试 break：列出失败测试名，回执中注明 `⚠️ 测试失败（交QA）: [测试名]`，不修复测试文件
+- ❌ 禁止新建/修改 `*_test.go` / `*.test.ts`，测试文件由 QA 独立维护
