@@ -33,3 +33,6 @@ go.work.sum
 data/
 *.db
 *.db-*
+
+# Compiled binary
+agent-queue
