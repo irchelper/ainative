@@ -51,9 +51,13 @@ go build -o agent-queue .
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `AGENT_QUEUE_DISCORD_WEBHOOK_URL` | Discord Incoming Webhook URL for task completion/failure notifications | No |
+| `AGENT_QUEUE_AGENT_WEBHOOKS` | Per-agent webhook URLs (format: `agent1=url1,agent2=url2`); routes done/failed by `assigned_to`, falls back to default URL on miss (V11) | No |
 | `AGENT_QUEUE_OPENCLAW_API_URL` | OpenClaw gateway URL for `/dispatch` and SessionNotifier (default: `http://localhost:18789`) | No |
 | `AGENT_QUEUE_OPENCLAW_API_KEY` | OpenClaw gateway token for `/dispatch` and SessionNotifier | No |
 | `AGENT_QUEUE_DB_PATH` | Override default SQLite database path (recommended: absolute path to avoid WorkingDirectory issues) | No |
+| `AGENT_QUEUE_STALE_CHECK_INTERVAL` | Stale task scan interval (default: `10m`) | No |
+| `AGENT_QUEUE_STALE_THRESHOLD` | Task is stale if unclaimed beyond this duration (default: `30m`) | No |
+| `AGENT_QUEUE_MAX_STALE_DISPATCHES` | Max stale re-dispatch count before alerting CEO (default: `3`) (V11) | No |
 
 ## API Reference
 

@@ -1,6 +1,6 @@
 # agent-queue 架构说明
 
-> 版本：v10 | 更新：2026-02-26 | 代码基线：commit `4049435` — V10 review-reject 两阶段链 + V10.1 vision/pm/ops seed + cancelled 终态 + e2e 测试隔离规范
+> 版本：v11 | 更新：2026-02-26 | 代码基线：commit `19535b2` — V11 agent_channel_map webhook路由 + stale max_dispatches限制
 > 对应 PRD：`PRD.md`
 
 ---
@@ -461,6 +461,30 @@ type Notifier interface {
 // 环境变量未配置时 no-op（不报错，log.Info）
 ```
 
+**per-agent webhook 路由（V11 新增，F15）：**
+
+`DiscordNotifier` 支持按 `task.AssignedTo` 路由到不同 Discord 频道：
+
+- 环境变量 `AGENT_QUEUE_AGENT_WEBHOOKS`，格式：`agent1=url1,agent2=url2,...`
+- 路由逻辑：按 `assigned_to` 查表 → miss 时 fallback 默认 `AGENT_QUEUE_DISCORD_WEBHOOK_URL`
+- 用途：done/failed 通知投递到各专家专属频道，而非全部汇聚到一个默认频道
+
+**当前部署配置（9专家独立 webhook）：**
+
+```
+coder   → #工程师 频道
+thinker → #思想家 频道
+writer  → #文案师 频道
+devops  → #运维 频道
+security→ #安全 频道
+ops     → #运营 频道
+pm      → #产品 频道
+vision  → #视觉分析师 频道
+qa      → #测试工程师 频道
+```
+
+未配置 agent 的任务通知仍投递到默认频道（`AGENT_QUEUE_DISCORD_WEBHOOK_URL`）。
+
 ### F7：POST /dispatch（原子化派发）
 
 | 方法 | 路径 | 说明 |
@@ -697,6 +721,18 @@ StartStaleTicker(interval=10min):
 **参数可配置（环境变量）：**
 - `AGENT_QUEUE_STALE_CHECK_INTERVAL`（默认 10m）
 - `AGENT_QUEUE_STALE_THRESHOLD`（默认 30m）
+- `AGENT_QUEUE_MAX_STALE_DISPATCHES`（默认 3）：stale re-dispatch 上限（V11 新增）
+
+**stale_dispatch_count 上限机制（V11）：**
+
+`tasks` 表新增 `stale_dispatch_count` 列，每次 stale re-dispatch 时 `TouchUpdatedAt` 同步自增。
+
+当 `stale_dispatch_count >= maxStaleDispatches`：
+- 停止 re-dispatch（不再唤醒专家）
+- 触发 `SessionNotifier.OnFailed(task)` 向 CEO session 发送告警
+- 告警格式：`FailureReason = "stale max dispatches reached (N/N)"`
+
+**意图：** 防止 stale ticker 对无响应专家无限轰炸。达到上限 = 系统认为该专家 session 异常，升级为人工决策。
 
 **与功能 B 的互补关系：**
 
@@ -740,7 +776,27 @@ export AGENT_QUEUE_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
 export AGENT_QUEUE_OPENCLAW_API_URL="http://localhost:18789"
 export AGENT_QUEUE_OPENCLAW_API_KEY="<gateway_token>"
 export AGENT_QUEUE_DB_PATH="/Users/kangxi/clawd/agent-queue/data/queue.db"
+
+# V11 新增：per-agent webhook 路由（格式：agent1=url1,agent2=url2,...）
+export AGENT_QUEUE_AGENT_WEBHOOKS="coder=https://...,thinker=https://...,writer=https://..."
+
+# V11 新增：stale re-dispatch 上限（默认 3）
+export AGENT_QUEUE_MAX_STALE_DISPATCHES=3
 ```
+
+**全量环境变量说明：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `AGENT_QUEUE_DISCORD_WEBHOOK_URL` | 默认 Discord Incoming Webhook URL（done/failed 通知） | — |
+| `AGENT_QUEUE_AGENT_WEBHOOKS` | per-agent webhook 路由，格式 `agent1=url1,agent2=url2`；按 `assigned_to` 路由，miss 时 fallback 默认 URL（V11） | — |
+| `AGENT_QUEUE_DISCORD_USER_ID` | Discord 用户 ID，用于 failed 消息 @mention | — |
+| `AGENT_QUEUE_OPENCLAW_API_URL` | OpenClaw Gateway URL（sessions_send 依赖） | `http://localhost:18789` |
+| `AGENT_QUEUE_OPENCLAW_API_KEY` | OpenClaw Gateway token | — |
+| `AGENT_QUEUE_DB_PATH` | SQLite 数据库路径（推荐绝对路径） | `data/queue.db` |
+| `AGENT_QUEUE_STALE_CHECK_INTERVAL` | stale ticker 扫描间隔 | `10m` |
+| `AGENT_QUEUE_STALE_THRESHOLD` | 无 claim 超过此时长视为 stale | `30m` |
+| `AGENT_QUEUE_MAX_STALE_DISPATCHES` | stale re-dispatch 上限，达到后告警 CEO（V11） | `3` |
 
 ### launchd plist 环境变量配置
 
@@ -794,6 +850,8 @@ export AGENT_QUEUE_DB_PATH="/Users/kangxi/clawd/agent-queue/data/queue.db"
 - **[V10] 为什么 isReviewReject 只判断特定 reviewer 角色：** 任何 assigned_to != retryAgent 都可以是 review-reject，但只有 thinker/security/vision 的职责是"审核"——这些角色失败后自然需要重新审核。其他角色（如 coder 退单 thinker）是技术求助，不需要原角色二次 approve
 - **[V10] UpdateSupersededByChain 为何必要：** 多级退单时，若只 SetSupersededBy 而不更新旧 superseded_by 指针，depsMetForID 仍会跟随旧 re-review，下游任务在旧 re-review done 时就解锁，新一轮 fix+re-review 失去约束力
 - **[V10.1] cancelled 终态语义：** `cancelled` = 任务主动放弃，不触发 autoRetry，不解锁下游依赖。`IsChainComplete` 中 cancelled 任务视为 None（链未完成），不等价于 done——这样 chain 中有 cancelled 任务时，链路完成通知不会误触发
+- **[V11] per-agent webhook 而非单一全局 webhook：** 单一全局 webhook 所有通知混入同一频道，成员难以辨别哪个任务属于哪个角色；per-agent 路由让 done/failed 通知精准投递到对应专家频道，CEO 频道不被噪音淹没。miss 时 fallback 默认 URL 确保向后兼容
+- **[V11] stale_dispatch_count 上限而非无限重试：** 无响应专家可能是 session 异常/网络断连，无限 re-dispatch 只会产生通知风暴；上限（默认 3 次）后升级为 CEO 告警，转人工决策，比无限轰炸更合理
 
 ---
 
