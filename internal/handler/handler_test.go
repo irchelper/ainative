@@ -2363,3 +2363,191 @@ func TestV10_VisionReviewReject_TwoStageChain(t *testing.T) {
 		t.Fatal("qa should be deps_met after vision re-review is done")
 	}
 }
+
+// -------------------------------------------------------------------
+// Cancelled state tests
+// -------------------------------------------------------------------
+
+// TestCancelled_FromFailed verifies failed→cancelled transition succeeds.
+func TestCancelled_FromFailed(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	// Create + drive task to failed.
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "cancel-me-failed", "assigned_to": "coder"})
+	var task model.Task
+	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
+	r.Body.Close()
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim", map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
+	claimR.Body.Close()
+
+	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	body, _ := json.Marshal(map[string]any{"status": "failed", "result": "broken", "version": ipTask.Version})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	var pr struct{ Task model.Task }
+	json.NewDecoder(resp.Body).Decode(&pr) //nolint:errcheck
+	resp.Body.Close()
+	failedTask := pr.Task
+
+	if failedTask.Status != "failed" {
+		t.Fatalf("expected failed, got %s", failedTask.Status)
+	}
+
+	// Now cancel it.
+	cancelledTask := patchTaskTo(t, srv, task.ID, "cancelled", failedTask.Version)
+	if cancelledTask.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", cancelledTask.Status)
+	}
+}
+
+// TestCancelled_FromPending verifies pending→cancelled transition succeeds.
+func TestCancelled_FromPending(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "cancel-pending", "assigned_to": "coder"})
+	var task model.Task
+	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
+	r.Body.Close()
+
+	cancelledTask := patchTaskTo(t, srv, task.ID, "cancelled", task.Version)
+	if cancelledTask.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", cancelledTask.Status)
+	}
+}
+
+// TestCancelled_FromDone_Fails verifies done→cancelled is rejected (422).
+func TestCancelled_FromDone_Fails(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "done-task-no-cancel", "assigned_to": "coder"})
+	var task model.Task
+	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
+	r.Body.Close()
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim", map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
+	claimR.Body.Close()
+
+	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+	doneTask := patchTaskTo(t, srv, task.ID, "done", ipTask.Version)
+	if doneTask.Status != "done" {
+		t.Fatalf("expected done, got %s", doneTask.Status)
+	}
+
+	// Attempt cancel from done – should fail.
+	body, _ := json.Marshal(map[string]any{"status": "cancelled", "version": doneTask.Version})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", resp.StatusCode)
+	}
+}
+
+// TestCancelled_NoAutoRetry verifies that cancelling a task does NOT trigger autoRetry.
+func TestCancelled_NoAutoRetry(t *testing.T) {
+	var mu sync.Mutex
+	var received []string
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if args, ok := body["args"].(map[string]any); ok {
+			if msg, ok := args["message"].(string); ok {
+				mu.Lock()
+				received = append(received, msg)
+				mu.Unlock()
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	// Create task and drive to failed (which normally triggers autoRetry for coder→thinker via routing table).
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "no-retry-on-cancel", "assigned_to": "coder"})
+	var task model.Task
+	json.NewDecoder(r.Body).Decode(&task) //nolint:errcheck
+	r.Body.Close()
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim", map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed) //nolint:errcheck
+	claimR.Body.Close()
+
+	ipTask := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	// Cancel directly from in_progress... but FSM doesn't allow that. Go pending→cancelled instead.
+	// Reset to pending first, then cancel.
+	pendingTask := patchTaskTo(t, srv, task.ID, "pending", ipTask.Version)
+	cancelledTask := patchTaskTo(t, srv, task.ID, "cancelled", pendingTask.Version)
+	if cancelledTask.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", cancelledTask.Status)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Check no tasks were auto-created (no retry task for coder).
+	listResp := getJSON(t, srv, "/tasks?assigned_to=coder&status=pending")
+	var listResult struct {
+		Tasks []model.Task `json:"tasks"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listResult) //nolint:errcheck
+	listResp.Body.Close()
+	for _, t2 := range listResult.Tasks {
+		if strings.Contains(t2.Title, "retry") {
+			t.Errorf("unexpected retry task created after cancel: %s", t2.Title)
+		}
+	}
+}
+
+// TestCancelled_NoDownstreamUnlock verifies that cancelling a task does NOT unlock downstream deps.
+func TestCancelled_NoDownstreamUnlock(t *testing.T) {
+	srv := newTestServer(t, nil)
+	defer srv.Close()
+
+	// Create parent task.
+	r := postJSON(t, srv, "/tasks", map[string]any{"title": "parent-task", "assigned_to": "coder"})
+	var parent model.Task
+	json.NewDecoder(r.Body).Decode(&parent) //nolint:errcheck
+	r.Body.Close()
+
+	// Create downstream task depending on parent.
+	r2 := postJSON(t, srv, "/tasks", map[string]any{
+		"title":       "downstream-task",
+		"assigned_to": "qa",
+		"depends_on":  []string{parent.ID},
+	})
+	var downstream model.Task
+	json.NewDecoder(r2.Body).Decode(&downstream) //nolint:errcheck
+	r2.Body.Close()
+
+	// Cancel parent.
+	cancelledParent := patchTaskTo(t, srv, parent.ID, "cancelled", parent.Version)
+	if cancelledParent.Status != "cancelled" {
+		t.Fatalf("expected parent cancelled, got %s", cancelledParent.Status)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Downstream should still be pending (deps NOT met, since parent is cancelled not done).
+	depsResp := getJSON(t, srv, "/tasks/"+downstream.ID+"/deps-met")
+	var dm model.DepsMet
+	json.NewDecoder(depsResp.Body).Decode(&dm) //nolint:errcheck
+	depsResp.Body.Close()
+	if dm.DepsMet {
+		t.Fatal("downstream should NOT be deps_met after parent is cancelled (not done)")
+	}
+}

@@ -978,6 +978,8 @@ func validateTransition(from, to model.Status, requiresReview bool) error {
 		{model.StatusBlocked, model.StatusInProgress}:   true,
 		// failed → pending: CEO retry (optional retry_assigned_to)
 		{model.StatusFailed, model.StatusPending}:       true,
+		// failed → cancelled: CEO cancels a failed task (no retry, no downstream unlock)
+		{model.StatusFailed, model.StatusCancelled}:     true,
 	}
 	if !allowed[transition{from, to}] {
 		return &ValidationError{Msg: fmt.Sprintf("transition %s → %s is not allowed", from, to)}

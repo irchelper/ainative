@@ -34,8 +34,10 @@ var validTransitions = map[model.Status]map[model.Status]bool{
 		model.StatusInProgress: true, // direct resume
 	},
 	// failed → pending: CEO decides to retry (with optional retry_assigned_to).
+	// failed → cancelled: CEO cancels a failed task (no retry, no downstream unlock).
 	model.StatusFailed: {
-		model.StatusPending: true,
+		model.StatusPending:    true,
+		model.StatusCancelled: true,
 	},
 	model.StatusDone:      {}, // terminal
 	model.StatusCancelled: {}, // terminal
