@@ -758,10 +758,14 @@ curl -X POST http://localhost:19827/tasks \
 ```
 
 **规则：**
-- 测试任务 `assigned_to` 统一用 `test`（不用真实专家名如 coder/devops）
-- 没有任何专家的 SOUL.md 配置了 `assigned_to=test`，测试任务不会被自驱 claim
-- 验证完成后手动 PATCH 为 failed（或等 server 重启清空）
-- 禁止用真实专家名创建测试任务，避免干扰专家自驱队列
+- 测试任务 `assigned_to` 统一用 `test` 或 `e2e-*` 前缀（如 `e2e-coder`、`e2e-qa`）
+- 禁止使用真实 agent 名（`coder/thinker/qa/devops/writer/ops/vision/pm/uiux/security`）
+  - 违规后果：stale ticker 每 10 分钟重新 dispatch，向真实 agent session 发送通知风暴
+- **例外**：验证 retry_routing 表路由（如 `coder → thinker`）必须使用真实 agent 名
+  - 此类任务 title 必须加 `[TEST]` 前缀（如 `[TEST] V7-coder`）
+  - 测试完成后立即 PATCH `status=cancelled`（利用 STEP2 引入的 cancelled 终态清理）
+- 没有任何专家的 SOUL.md 配置了 `assigned_to=test` 或 `e2e-*`，测试任务不会被真实 agent claim
+- e2e 脚本必须在脚本末尾调用 cleanup 函数，cancel 所有残留的 `[TEST]` 前缀任务
 
 ---
 
@@ -799,3 +803,50 @@ curl -X POST http://localhost:19827/dispatch/chain \
 - ✅ 编译通过 + lint 无 error = 验收通过
 - 若现有测试 break：列出失败测试名，回执中注明 `⚠️ 测试失败（交QA）: [测试名]`，不修复测试文件
 - ❌ 禁止新建/修改 `*_test.go` / `*.test.ts`，测试文件由 QA 独立维护
+
+---
+
+## V11（计划中）：POST /dispatch/graph
+
+### 背景
+
+当前 `/dispatch/chain` 仅支持线性串行链（A→B→C）。复杂任务常需要**并行+汇聚**的 DAG 结构（如：A→[B,C]→D，B/C 并行执行，D 依赖 B+C 都完成）。
+
+现有手动构建方式：
+```bash
+# 手动多次 POST，逐个设置 depends_on
+POST /tasks {"title":"A", ...}                          # A
+POST /tasks {"title":"B", "depends_on":["A.id"], ...}   # B depends on A
+POST /tasks {"title":"C", "depends_on":["A.id"], ...}   # C depends on A
+POST /tasks {"title":"D", "depends_on":["B.id","C.id"]} # D depends on B+C
+```
+
+**问题：** 多次 POST 非原子性（部分失败时图状态不一致）；客户端需要记录每个 task_id 并手动穿联；易出错。
+
+### V11 目标：一次 POST 提交完整 DAG
+
+```bash
+POST /dispatch/graph
+{
+  "graph_title": "并行评审流程",
+  "notify_ceo_on_complete": true,
+  "nodes": [
+    {"id": "a", "title": "实现功能",   "assigned_to": "coder"},
+    {"id": "b", "title": "架构审核",   "assigned_to": "thinker", "depends_on": ["a"]},
+    {"id": "c", "title": "视觉验收",   "assigned_to": "vision",  "depends_on": ["a"]},
+    {"id": "d", "title": "QA测试",     "assigned_to": "qa",      "depends_on": ["b","c"]},
+    {"id": "e", "title": "部署",       "assigned_to": "devops",  "depends_on": ["d"]}
+  ]
+}
+```
+
+- `nodes[].id`：客户端本地引用 ID（字符串），由 server 转换为 SQLite task_id
+- `depends_on`：引用同图内其他 node 的本地 id
+- server 在单事务内原子创建所有任务 + 依赖关系
+- 返回：所有 node 的 `{local_id → task_id}` 映射 + 链路入口任务（无依赖的 node）的 sessions_send 唤醒
+
+### 当前状态
+
+**V11 尚未实现。** 现阶段使用手动多次 POST 或 `/dispatch/chain`（线性链）替代。V11 实现后，线性链 `/dispatch/chain` 将成为 `/dispatch/graph` 的 DAG 退化形式（仍保留向后兼容）。
+
+**实现预期复杂度：** store.go 新增 `CreateGraph` 事务方法（~60 行）+ handler.go 新增路由（~40 行）+ 客户端 id→task_id 映射逻辑（~30 行）。
