@@ -363,6 +363,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/agents/stats", h.handleAPIAgentStats)
 	// V22: Bulk operations.
 	h.registerBulkRoutes(mux)
+	h.registerCommentRoutes(mux)
 }
 
 // -------------------------------------------------------------------

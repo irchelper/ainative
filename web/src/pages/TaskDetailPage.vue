@@ -23,6 +23,9 @@ async function load() {
     // Reverse so newest first
     history.value = [...(resp.history ?? [])].reverse()
 
+    // V24-B: load comments
+    await loadComments()
+
     // V23-B: load chain tasks for inline chain display
     if (resp.task.chain_id) {
       try {
@@ -192,6 +195,64 @@ async function updatePriority(value: number) {
     priorityError.value = e instanceof Error ? e.message : String(e)
   } finally {
     updatingPriority.value = false
+  }
+}
+
+// V24-B: Comments
+interface Comment {
+  id: number
+  task_id: string
+  author: string
+  content: string
+  created_at: string
+}
+
+const comments = ref<Comment[]>([])
+const newCommentContent = ref('')
+const newCommentAuthor = ref('')
+const commentLoading = ref(false)
+const commentError = ref<string | null>(null)
+const commentSubmitting = ref(false)
+
+async function loadComments() {
+  if (!task.value) return
+  commentLoading.value = true
+  try {
+    const resp = await fetch(`/api/tasks/${task.value.id}/comments`)
+    if (resp.ok) {
+      const data = await resp.json()
+      comments.value = data.comments ?? []
+    }
+  } catch {
+    // best-effort
+  } finally {
+    commentLoading.value = false
+  }
+}
+
+async function submitComment() {
+  if (!task.value || !newCommentContent.value.trim()) return
+  commentSubmitting.value = true
+  commentError.value = null
+  try {
+    const resp = await fetch(`/api/tasks/${task.value.id}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        author: newCommentAuthor.value.trim() || 'human',
+        content: newCommentContent.value.trim(),
+      }),
+    })
+    if (!resp.ok) {
+      const err = await resp.json()
+      throw new Error(err.error ?? `HTTP ${resp.status}`)
+    }
+    newCommentContent.value = ''
+    await loadComments()
+  } catch (e) {
+    commentError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    commentSubmitting.value = false
   }
 }
 </script>
@@ -417,6 +478,66 @@ async function updatePriority(value: number) {
                 <div v-if="h.note" class="text-xs text-gray-500 mt-0.5">{{ h.note }}</div>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- V24-B: Comments section (full width below the grid) -->
+      <div v-if="task" class="mt-6 bg-gray-900 border border-gray-700 rounded-2xl p-5">
+        <h2 class="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+          💬 评论
+          <span class="text-xs text-gray-600 font-normal">{{ comments.length }} 条</span>
+        </h2>
+
+        <!-- Comment list -->
+        <div v-if="commentLoading" class="text-gray-600 text-sm py-4 text-center">加载中…</div>
+        <div v-else-if="comments.length === 0" class="text-gray-600 text-sm text-center py-4">暂无评论</div>
+        <div v-else class="space-y-3 mb-4">
+          <div
+            v-for="c in comments"
+            :key="c.id"
+            class="flex gap-3"
+          >
+            <div class="w-7 h-7 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400 shrink-0 mt-0.5">
+              {{ (c.author || '?')[0].toUpperCase() }}
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-medium text-gray-300">{{ c.author || 'anonymous' }}</span>
+                <span class="text-xs text-gray-600">{{ formatTime(c.created_at) }}</span>
+              </div>
+              <div class="text-sm text-gray-400 bg-gray-800 rounded-lg px-3 py-2 border border-gray-700/50 whitespace-pre-wrap break-words">{{ c.content }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Comment input -->
+        <div class="border-t border-gray-800 pt-4 space-y-2">
+          <div class="flex gap-2">
+            <input
+              v-model="newCommentAuthor"
+              type="text"
+              placeholder="作者（可选）"
+              class="w-28 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500/50"
+            />
+            <textarea
+              v-model="newCommentContent"
+              placeholder="写下评论…"
+              rows="2"
+              class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500/50 resize-none"
+              @keydown.ctrl.enter="submitComment"
+            />
+          </div>
+          <div v-if="commentError" class="text-xs text-red-400">{{ commentError }}</div>
+          <div class="flex justify-end">
+            <button
+              class="text-sm px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg disabled:opacity-50 transition-colors"
+              :disabled="commentSubmitting || !newCommentContent.trim()"
+              @click="submitComment"
+            >
+              <span v-if="commentSubmitting">发送中…</span>
+              <span v-else>💬 发送</span>
+            </button>
           </div>
         </div>
       </div>
