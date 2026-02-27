@@ -6,11 +6,17 @@ interface Config {
   version: string
   agents: Array<{ name: string; label: string }>
   outbound_webhook_url?: string
+  db_path?: string
+  pid?: number
+  uptime?: string
+  listen_addr?: string
 }
 
 const config = ref<Config | null>(null)
 const loading = ref(true)
 const error = ref<string | null>(null)
+const cleanupLoading = ref(false)
+const cleanupMessage = ref<string | null>(null)
 
 async function load() {
   loading.value = true
@@ -27,6 +33,22 @@ async function load() {
 }
 
 onMounted(load)
+
+async function cleanupTestTasks() {
+  cleanupLoading.value = true
+  cleanupMessage.value = null
+  try {
+    const resp = await fetch('/api/admin/cleanup-test-tasks', { method: 'DELETE' })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = await resp.json()
+    cleanupMessage.value = `已清理 ${data.deleted_count ?? 0} 条测试任务`
+    await load()
+  } catch (e) {
+    cleanupMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    cleanupLoading.value = false
+  }
+}
 
 function maskUrl(url: string): string {
   try {
@@ -62,7 +84,38 @@ function maskUrl(url: string): string {
               <div class="text-gray-500 text-xs">已知 Agents</div>
               <div class="text-gray-200 mt-1">{{ config.agents.length }} 个</div>
             </div>
+            <div>
+              <div class="text-gray-500 text-xs">DB 路径</div>
+              <div class="text-gray-200 mt-1 font-mono text-xs break-all">{{ config.db_path ?? '-' }}</div>
+            </div>
+            <div>
+              <div class="text-gray-500 text-xs">进程 PID</div>
+              <div class="text-gray-200 mt-1 font-mono">{{ config.pid ?? '-' }}</div>
+            </div>
+            <div>
+              <div class="text-gray-500 text-xs">Uptime</div>
+              <div class="text-gray-200 mt-1 font-mono">{{ config.uptime ?? '-' }}</div>
+            </div>
+            <div>
+              <div class="text-gray-500 text-xs">监听地址</div>
+              <div class="text-gray-200 mt-1 font-mono">{{ config.listen_addr ?? '-' }}</div>
+            </div>
           </div>
+        </div>
+
+        <!-- Cleanup test data -->
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl p-5">
+          <h2 class="text-sm font-semibold text-gray-300 mb-2">测试数据清理</h2>
+          <p class="text-xs text-gray-500 mb-4">仅清理终态任务（done/failed/cancelled）且 title/assigned_to 匹配测试规则。</p>
+          <button
+            class="text-sm px-4 py-2 rounded-lg bg-red-600/20 text-red-300 border border-red-500/30 hover:bg-red-600/30 disabled:opacity-50"
+            :disabled="cleanupLoading"
+            @click="cleanupTestTasks"
+          >
+            <span v-if="cleanupLoading">清理中…</span>
+            <span v-else>🧹 清理测试数据</span>
+          </button>
+          <div v-if="cleanupMessage" class="text-xs text-gray-400 mt-2">{{ cleanupMessage }}</div>
         </div>
 
         <!-- Webhook config -->

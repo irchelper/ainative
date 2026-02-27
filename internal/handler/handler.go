@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,9 @@ type Handler struct {
 
 	// agent timeout: in_progress tasks older than this → failed
 	agentTimeoutMinutes int
+
+	// process metadata for /api/config
+	startTime time.Time
 }
 
 // New creates a Handler and registers all routes on mux.
@@ -61,6 +65,7 @@ func New(db *sql.DB, s *store.Store, n notify.Notifier, oc *openclaw.Client) *Ha
 		staleThreshold:      envDuration("AGENT_QUEUE_STALE_THRESHOLD", 30*time.Minute),
 		maxStaleDispatches:  envInt("AGENT_QUEUE_MAX_STALE_DISPATCHES", 3),
 		agentTimeoutMinutes: envInt("AGENT_QUEUE_AGENT_TIMEOUT_MINUTES", 90),
+		startTime:           time.Now().UTC(),
 	}
 }
 
@@ -343,6 +348,22 @@ func envInt(key string, def int) int {
 	return n
 }
 
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func formatUptime(d time.Duration) string {
+	if d < time.Minute {
+		return "0h 0m"
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
 // Register wires up all routes on mux.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.handleHealth)
@@ -373,6 +394,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// V22: Bulk operations.
 	h.registerBulkRoutes(mux)
 	h.registerCommentRoutes(mux)
+	h.registerAdminRoutes(mux)
 }
 
 // -------------------------------------------------------------------
@@ -1459,6 +1481,10 @@ func (h *Handler) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		Agents             []AgentInfo `json:"agents"`
 		Version            string      `json:"version"`
 		OutboundWebhookURL string      `json:"outbound_webhook_url,omitempty"`
+		DBPath             string      `json:"db_path,omitempty"`
+		PID                int         `json:"pid,omitempty"`
+		Uptime             string      `json:"uptime,omitempty"`
+		ListenAddr         string      `json:"listen_addr,omitempty"`
 	}
 
 	// Default known agents (can be extended via config in future phases).
@@ -1478,10 +1504,26 @@ func (h *Handler) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	// V23-A: expose (non-secret) webhook config.
 	outboundWebhookURL := os.Getenv("AGENT_QUEUE_WEBHOOK_URL")
 
+	// V28-A: system info metadata
+	dbPath := os.Getenv("AGENT_QUEUE_DB_PATH")
+	if dbPath == "" {
+		dbPath = "data/queue.db"
+	}
+	if abs, err := filepath.Abs(dbPath); err == nil {
+		dbPath = abs
+	}
+	port := envString("AGENT_QUEUE_PORT", "19827")
+	listenAddr := "localhost:" + port
+	uptime := formatUptime(time.Since(h.startTime))
+
 	writeJSON(w, http.StatusOK, Response{
 		Agents:             agents,
 		Version:            "v27",
 		OutboundWebhookURL: outboundWebhookURL,
+		DBPath:             dbPath,
+		PID:                os.Getpid(),
+		Uptime:             uptime,
+		ListenAddr:         listenAddr,
 	})
 }
 
