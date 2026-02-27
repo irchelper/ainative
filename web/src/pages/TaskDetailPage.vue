@@ -78,6 +78,58 @@ function formatTime(iso: string): string {
 }
 
 const isHumanTask = computed(() => task.value?.assigned_to === 'human')
+const isPendingApproval = computed(
+  () => task.value?.assigned_to === 'human' && task.value?.status === 'in_progress'
+)
+
+// Approve / Reject state
+const approving = ref(false)
+const rejecting = ref(false)
+const rejectReason = ref('')
+const showRejectInput = ref(false)
+const actionError = ref<string | null>(null)
+
+async function approve() {
+  if (!task.value) return
+  approving.value = true
+  actionError.value = null
+  try {
+    await api.patchTask(task.value.id, {
+      status: 'done',
+      result: '✅ 人工审批通过',
+      version: task.value.version,
+    })
+    await load()
+  } catch (e) {
+    actionError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    approving.value = false
+  }
+}
+
+async function reject() {
+  if (!task.value) return
+  if (!rejectReason.value.trim()) {
+    showRejectInput.value = true
+    return
+  }
+  rejecting.value = true
+  actionError.value = null
+  try {
+    await api.patchTask(task.value.id, {
+      status: 'failed',
+      failure_reason: rejectReason.value.trim(),
+      version: task.value.version,
+    })
+    await load()
+    showRejectInput.value = false
+    rejectReason.value = ''
+  } catch (e) {
+    actionError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    rejecting.value = false
+  }
+}
 </script>
 
 <template>
@@ -166,6 +218,48 @@ const isHumanTask = computed(() => task.value?.assigned_to === 'human')
                 rel="noopener"
                 class="text-blue-400 hover:text-blue-300 hover:underline text-sm break-all"
               >{{ task.commit_url }}</a>
+            </div>
+
+            <!-- Human Approval Panel -->
+            <div v-if="isPendingApproval" class="mt-4 border border-amber-500/30 bg-amber-500/5 rounded-xl p-4">
+              <div class="flex items-center gap-2 mb-3">
+                <span class="text-base">👤</span>
+                <span class="text-sm font-semibold text-amber-300">等待人工审批</span>
+              </div>
+
+              <div v-if="actionError" class="mb-3 p-2 bg-red-900/30 border border-red-500/30 rounded text-xs text-red-300">
+                {{ actionError }}
+              </div>
+
+              <!-- Reject reason input -->
+              <div v-if="showRejectInput" class="mb-3">
+                <textarea
+                  v-model="rejectReason"
+                  placeholder="请填写拒绝原因..."
+                  rows="3"
+                  class="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-red-500/60 resize-none"
+                />
+              </div>
+
+              <div class="flex gap-2">
+                <button
+                  class="flex-1 py-2 rounded-lg text-sm font-medium bg-green-500/15 text-green-400 border border-green-500/30 hover:bg-green-500/25 disabled:opacity-50 transition-colors"
+                  :disabled="approving || rejecting"
+                  @click="approve"
+                >
+                  <span v-if="approving">处理中…</span>
+                  <span v-else>✅ 批准</span>
+                </button>
+                <button
+                  class="flex-1 py-2 rounded-lg text-sm font-medium bg-red-500/15 text-red-400 border border-red-500/30 hover:bg-red-500/25 disabled:opacity-50 transition-colors"
+                  :disabled="approving || rejecting"
+                  @click="reject"
+                >
+                  <span v-if="rejecting">处理中…</span>
+                  <span v-else-if="showRejectInput">❌ 确认拒绝</span>
+                  <span v-else>❌ 拒绝</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

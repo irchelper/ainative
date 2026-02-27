@@ -48,6 +48,17 @@ function agentBadge(assignedTo: string): string {
     ? 'bg-amber-500/20 text-amber-400'
     : 'bg-gray-700 text-gray-400'
 }
+
+function isPendingApproval(task: Task): boolean {
+  return task.assigned_to === 'human' && task.status === 'in_progress'
+}
+
+function cardClass(task: Task): string {
+  if (isPendingApproval(task)) {
+    return 'bg-gray-800 border border-amber-500/50 rounded-lg p-3 cursor-pointer hover:border-amber-400 transition-colors ring-1 ring-amber-500/20'
+  }
+  return 'bg-gray-800 hover:bg-gray-750 border border-gray-700/40 rounded-lg p-3 cursor-pointer hover:border-gray-600 transition-colors'
+}
 </script>
 
 <template>
@@ -87,9 +98,13 @@ function agentBadge(assignedTo: string): string {
             <div
               v-for="task in tasksByStatus[col.key]"
               :key="task.id"
-              class="bg-gray-800 hover:bg-gray-750 border border-gray-700/40 rounded-lg p-3 cursor-pointer hover:border-gray-600 transition-colors"
+              :class="cardClass(task)"
               @click="$router.push(`/tasks/${task.id}`)"
             >
+              <!-- Pending approval badge -->
+              <div v-if="isPendingApproval(task)" class="flex items-center gap-1 mb-1.5">
+                <span class="text-xs text-amber-400 font-semibold">👤 待审批</span>
+              </div>
               <div class="text-xs font-medium text-gray-200 leading-snug mb-2 line-clamp-2">
                 {{ task.title }}
               </div>
