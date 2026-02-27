@@ -1,14 +1,14 @@
 [中文文档](./README.zh-CN.md)
 
-# agent-queue
+# ainative
 
-**Stop babysitting your AI agents.** agent-queue is a lightweight task queue with an AI-native workbench UI that lets multiple AI agents coordinate autonomously — no central orchestrator required.
+**Stop babysitting your AI agents.** ainative is a lightweight task queue with an AI-native workbench UI that lets multiple AI agents coordinate autonomously — no central orchestrator required.
 
 Agents poll for work, claim tasks atomically, and report completion via HTTP. Serial chains run end-to-end without human intervention: when task A finishes, task B unlocks automatically; the next agent picks it up on its next poll cycle.
 
 Built with SQLite + Go. Single binary, zero external dependencies, runs on your laptop.
 
-## Why agent-queue?
+## Why ainative?
 
 Without a persistent task queue, multi-agent systems break in predictable ways:
 
@@ -16,7 +16,7 @@ Without a persistent task queue, multi-agent systems break in predictable ways:
 - **Lost state**: Task status lives in LLM context. Context compression or a new session = lost progress.
 - **Silent failures**: Agents complete work but no one is notified. Users ask "did it finish?" instead of being told.
 
-agent-queue moves task state out of agent memory and into SQLite. Any agent can crash and recover. Chains advance automatically. Completions notify you directly.
+ainative moves task state out of agent memory and into SQLite. Any agent can crash and recover. Chains advance automatically. Completions notify you directly.
 
 ## Features
 
