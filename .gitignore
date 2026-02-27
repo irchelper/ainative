@@ -36,3 +36,7 @@ data/
 
 # Compiled binary
 agent-queue
+
+# Frontend build output
+dist/
+web/node_modules/
