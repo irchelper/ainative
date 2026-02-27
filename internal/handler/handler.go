@@ -227,8 +227,11 @@ func (h *Handler) checkHumanTimeouts() {
 }
 
 // checkAgentTimeouts scans in_progress tasks (assigned_to != "human") and
-// transitions to failed if started_at exceeds agentTimeoutMinutes.
-// Triggered on every ticker cycle alongside checkStaleTasks and checkHumanTimeouts.
+// transitions to failed if updated_at exceeds the effective timeout threshold.
+//
+// V27-A P0-1: use updated_at instead of started_at so that active agents
+//   (which call PATCH to report progress) are not killed mid-execution.
+// V27-A P0-2: per-task timeout_minutes takes priority over global agentTimeoutMinutes.
 func (h *Handler) checkAgentTimeouts() {
 	if h.agentTimeoutMinutes <= 0 {
 		return
@@ -239,11 +242,17 @@ func (h *Handler) checkAgentTimeouts() {
 		return
 	}
 	now := time.Now().UTC()
-	threshold := time.Duration(h.agentTimeoutMinutes) * time.Minute
 	for _, task := range tasks {
 		if task.AssignedTo == "human" {
 			continue
 		}
+		// P0-2: per-task timeout wins over global config.
+		timeoutMinutes := h.agentTimeoutMinutes
+		if task.TimeoutMinutes != nil && *task.TimeoutMinutes > 0 {
+			timeoutMinutes = *task.TimeoutMinutes
+		}
+		threshold := time.Duration(timeoutMinutes) * time.Minute
+
 		if task.StartedAt == nil {
 			continue
 		}
@@ -252,7 +261,7 @@ func (h *Handler) checkAgentTimeouts() {
 		}
 		// Timed out → PATCH failed
 		failedStatus := model.StatusFailed
-		reason := fmt.Sprintf("agent_timeout: exceeded %dmin SLA", h.agentTimeoutMinutes)
+		reason := fmt.Sprintf("agent_timeout: exceeded %dmin SLA", timeoutMinutes)
 		_, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
 			Status:        &failedStatus,
 			FailureReason: &reason,
@@ -263,8 +272,8 @@ func (h *Handler) checkAgentTimeouts() {
 			log.Printf("[agent_timeout] PatchTask failed for %s: %v", task.ID, err)
 			continue
 		}
-		log.Printf("[agent_timeout] task %s (%s) timed out after %dmin → failed",
-			task.ID, task.Title, h.agentTimeoutMinutes)
+		log.Printf("[agent_timeout] task %s (%s) timed out after %dmin → failed (updated_at idle)",
+			task.ID, task.Title, timeoutMinutes)
 		// Notify CEO via SessionNotifier (same path as handleFailedTask)
 		if h.sessionN != nil {
 			task.FailureReason = reason

@@ -362,11 +362,16 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 	}
 
 	if req.Status != nil {
+		note := req.Note
+		// V27-A P0-3: annotate recovery when agent delivers result after timeout.
+		if current.Status == model.StatusFailed && newStatus == model.StatusDone && note == "" {
+			note = "recovered from failed"
+		}
 		_, err = tx.Exec(`
 			INSERT INTO task_history (task_id, from_status, to_status, changed_by, note, changed_at)
 			VALUES (?, ?, ?, ?, ?, ?)`,
 			id, string(current.Status), string(newStatus),
-			req.ChangedBy, req.Note, now)
+			req.ChangedBy, note, now)
 		if err != nil {
 			return model.Task{}, nil, fmt.Errorf("insert history: %w", err)
 		}
@@ -1057,9 +1062,11 @@ func validateTransition(from, to model.Status, requiresReview bool) error {
 		{model.StatusBlocked, model.StatusPending}:      true,
 		{model.StatusBlocked, model.StatusInProgress}:   true,
 		// failed → pending: CEO retry (optional retry_assigned_to)
-		{model.StatusFailed, model.StatusPending}:       true,
+		{model.StatusFailed, model.StatusPending}:  true,
 		// failed → cancelled: CEO cancels a failed task (no retry, no downstream unlock)
-		{model.StatusFailed, model.StatusCancelled}:     true,
+		{model.StatusFailed, model.StatusCancelled}: true,
+		// V27-A P0-3: failed → done: agent delivers result after timeout; idempotent recovery.
+		{model.StatusFailed, model.StatusDone}: true,
 	}
 	if !allowed[transition{from, to}] {
 		return &ValidationError{Msg: fmt.Sprintf("transition %s → %s is not allowed", from, to)}
