@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useDashboardStore } from '@/stores/dashboardStore'
 import { usePolling } from '@/composables/usePolling'
 import { useSSE } from '@/composables/useSSE'
 import { api } from '@/api/client'
 import type { Task } from '@/types'
+
+const { t } = useI18n()
 
 const store = useDashboardStore()
 const { loading, error, refresh } = usePolling(() => store.fetch(), 10_000)
@@ -159,7 +162,7 @@ function clearSelection() {
 async function bulkAction(action: 'cancel' | 'reassign') {
   if (!selectedIds.value.size) return
   if (action === 'reassign' && !reassignTarget.value.trim()) {
-    bulkError.value = '请输入重新分配的 agent 名称'
+    bulkError.value = t('dashboard.agentName') + ' is required'
     return
   }
   bulkLoading.value = true
@@ -208,7 +211,7 @@ async function bulkAction(action: 'cancel' | 'reassign') {
         <input
           v-model="searchQuery"
           type="text"
-          placeholder="搜索任务标题或描述…"
+          :placeholder="t('dashboard.searchPlaceholder')"
           class="flex-1 bg-transparent text-sm text-gray-200 placeholder-gray-600 focus:outline-none"
         />
         <button
@@ -224,7 +227,7 @@ async function bulkAction(action: 'cancel' | 'reassign') {
         v-if="searchResults !== null"
         class="absolute left-0 right-0 top-full mt-1 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 max-h-80 overflow-y-auto"
       >
-        <div v-if="!searchResults.length" class="px-4 py-6 text-center text-gray-600 text-sm">无匹配结果</div>
+        <div v-if="!searchResults.length" class="px-4 py-6 text-center text-gray-600 text-sm">{{ t('dashboard.noResults') }}</div>
         <div
           v-for="task in searchResults"
           :key="task.id"
@@ -273,7 +276,7 @@ async function bulkAction(action: 'cancel' | 'reassign') {
           </div>
         </div>
         <div class="flex-1 overflow-y-auto p-4 space-y-3">
-          <div v-if="loading && !store.data" class="text-center text-gray-600 py-12">加载中…</div>
+          <div v-if="loading && !store.data" class="text-center text-gray-600 py-12">{{ t('common.loading') }}</div>
           <div v-else-if="humanTodos.length === 0" class="text-center text-gray-600 py-12">
             <div class="text-4xl mb-3">✨</div>
             <div class="text-sm">暂无待办</div>
@@ -353,36 +356,36 @@ async function bulkAction(action: 'cancel' | 'reassign') {
           v-if="selectedIds.size > 0"
           class="px-4 py-2.5 bg-blue-950/40 border-b border-blue-500/20 flex items-center gap-2 flex-wrap"
         >
-          <span class="text-xs text-blue-400 font-medium">已选 {{ selectedIds.size }} 个</span>
+          <span class="text-xs text-blue-400 font-medium">{{ t('dashboard.selected', { n: selectedIds.size }) }}</span>
           <button
             class="text-xs px-3 py-1.5 bg-red-800/60 hover:bg-red-700/60 text-red-300 rounded-lg transition-colors disabled:opacity-50"
             :disabled="bulkLoading"
             @click="bulkAction('cancel')"
-          >✖ 批量取消</button>
+          >✖ {{ t('dashboard.bulkCancel') }}</button>
           <div class="flex items-center gap-1.5">
             <input
               v-model="reassignTarget"
               type="text"
-              placeholder="agent 名称…"
+              :placeholder="t('dashboard.agentName') + '…'"
               class="text-xs bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-gray-200 w-24 focus:outline-none focus:border-blue-500"
             />
             <button
               class="text-xs px-3 py-1.5 bg-blue-800/60 hover:bg-blue-700/60 text-blue-300 rounded-lg transition-colors disabled:opacity-50"
               :disabled="bulkLoading || !reassignTarget.trim()"
               @click="bulkAction('reassign')"
-            >↩ 重新分配</button>
+            >↩ {{ t('dashboard.bulkReassign') }}</button>
           </div>
           <button
             class="text-xs text-gray-500 hover:text-gray-300 ml-auto"
             @click="clearSelection"
-          >✕ 清除</button>
+          >✕ {{ t('dashboard.clearSelection') }}</button>
           <div v-if="bulkError" class="w-full text-xs text-red-400">{{ bulkError }}</div>
         </div>
 
         <div class="flex-1 overflow-y-auto p-4 space-y-3">
           <div v-if="exceptions.length === 0" class="text-center text-gray-600 py-12">
             <div class="text-4xl mb-3">✅</div>
-            <div class="text-sm">无异常任务</div>
+            <div class="text-sm">{{ t('dashboard.noExceptions') }}</div>
           </div>
 
           <div

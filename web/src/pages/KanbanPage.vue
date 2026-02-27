@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { usePolling } from '@/composables/usePolling'
 import { useSSE } from '@/composables/useSSE'
+
+const { t } = useI18n()
 import { api } from '@/api/client'
 import type { Task, TaskStatus } from '@/types'
 
@@ -70,7 +73,7 @@ function cardClass(task: Task): string {
     <div class="p-3 md:p-6">
       <div class="flex items-center justify-between mb-6">
         <div>
-          <h1 class="text-xl font-bold text-gray-100">📋 看板</h1>
+          <h1 class="text-xl font-bold text-gray-100">📋 {{ t('kanban.title') }}</h1>
           <p class="text-gray-500 text-sm mt-1">全局任务审计视图</p>
         </div>
         <div class="flex items-center gap-3">
@@ -88,7 +91,7 @@ function cardClass(task: Task): string {
       </div>
 
       <div v-if="error" class="mb-4 p-3 bg-red-900/40 border border-red-500 rounded text-sm text-red-300">{{ error }}</div>
-      <div v-if="loading && !allTasks.length" class="text-gray-600 text-center py-20">加载中…</div>
+      <div v-if="loading && !allTasks.length" class="text-gray-600 text-center py-20">{{ t('common.loading') }}</div>
 
       <div v-else class="flex gap-3 overflow-x-auto pb-4">
         <div
@@ -114,7 +117,7 @@ function cardClass(task: Task): string {
             >
               <!-- Human task badge -->
               <div v-if="isPendingApproval(task)" class="flex items-center gap-1 mb-1.5">
-                <span class="text-xs text-amber-400 font-semibold">👤 人工任务</span>
+                <span class="text-xs text-amber-400 font-semibold">👤 {{ t('kanban.humanTask') }}</span>
               </div>
               <div class="text-xs font-medium text-gray-200 leading-snug mb-2 line-clamp-2">
                 {{ task.title }}

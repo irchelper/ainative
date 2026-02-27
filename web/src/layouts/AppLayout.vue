@@ -1,23 +1,26 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { useDashboardStore } from '@/stores/dashboardStore'
+import { toggleLocale } from '@/i18n'
 
 const route = useRoute()
 const dashStore = useDashboardStore()
+const { t, locale } = useI18n()
 
 const todoCount = computed(() => dashStore.data?.todo.length ?? 0)
 const exceptionCount = computed(() => dashStore.data?.exceptions.length ?? 0)
 
-const navItems = [
-  { path: '/', label: 'Dashboard', icon: '🏠' },
-  { path: '/goals/new', label: '目标输入', icon: '🎯' },
-  { path: '/goals', label: '目标追踪', icon: '📈' },
-  { path: '/kanban', label: '看板', icon: '📋' },
-  { path: '/graph', label: 'DAG', icon: '🕸' },
-  { path: '/stats', label: '统计', icon: '📊' },
-  { path: '/settings', label: '设置', icon: '⚙️' },
-]
+const navItems = computed(() => [
+  { path: '/', label: t('nav.dashboard'), icon: '🏠' },
+  { path: '/goals/new', label: t('nav.goals'), icon: '🎯' },
+  { path: '/goals', label: t('nav.tracking'), icon: '📈' },
+  { path: '/kanban', label: t('nav.kanban'), icon: '📋' },
+  { path: '/graph', label: t('nav.graph'), icon: '🕸' },
+  { path: '/stats', label: t('nav.stats'), icon: '📊' },
+  { path: '/settings', label: t('nav.settings'), icon: '⚙️' },
+])
 
 function isActive(path: string) {
   if (path === '/') return route.path === '/'
@@ -27,6 +30,9 @@ function isActive(path: string) {
 // V22: Mobile hamburger menu
 const mobileMenuOpen = ref(false)
 function closeMobileMenu() { mobileMenuOpen.value = false }
+
+// V24-A: language toggle
+const langLabel = computed(() => locale.value === 'zh' ? 'EN' : '中')
 </script>
 
 <template>
@@ -64,9 +70,13 @@ function closeMobileMenu() { mobileMenuOpen.value = false }
           </span>
         </div>
         <div class="w-px h-4 bg-gray-700 hidden md:block"></div>
+        <!-- V24-A: language toggle -->
+        <button
+          class="hidden md:flex items-center text-xs font-medium text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-2.5 py-1 rounded-md border border-gray-700 transition-colors"
+          @click="toggleLocale"
+        >{{ langLabel }}</button>
         <div class="hidden md:flex items-center gap-1.5 text-xs text-gray-500">
           <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
-          <span>已连接</span>
         </div>
       </div>
 
@@ -134,17 +144,22 @@ function closeMobileMenu() { mobileMenuOpen.value = false }
         <div class="mt-auto pt-4 border-t border-gray-800">
           <div class="px-3 py-2 text-xs text-gray-600">
             <div class="flex justify-between mb-1">
-              <span>任务队列</span>
+              <span>{{ locale === 'zh' ? '任务队列' : 'Queue' }}</span>
               <span class="text-gray-400">{{ (dashStore.data?.stats.total ?? 0) }}</span>
             </div>
             <div class="flex justify-between mb-1">
-              <span>进行中</span>
+              <span>{{ locale === 'zh' ? '进行中' : 'Active' }}</span>
               <span class="text-blue-400">{{ (dashStore.data?.stats.in_progress ?? 0) }}</span>
             </div>
-            <div class="flex justify-between">
-              <span>已完成</span>
+            <div class="flex justify-between mb-3">
+              <span>{{ locale === 'zh' ? '已完成' : 'Done' }}</span>
               <span class="text-green-400">{{ (dashStore.data?.stats.done ?? 0) }}</span>
             </div>
+            <!-- V24-A: language toggle in sidebar -->
+            <button
+              class="w-full text-center text-xs font-medium text-gray-500 hover:text-white bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700 transition-colors"
+              @click="toggleLocale"
+            >{{ locale === 'zh' ? '🌐 English' : '🌐 中文' }}</button>
           </div>
         </div>
       </aside>

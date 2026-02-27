@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import AppLayout from '@/layouts/AppLayout.vue'
+
+const { t } = useI18n()
 
 interface AgentStat {
   agent: string
@@ -61,8 +64,8 @@ function successBarColor(rate: number): string {
 }
 
 function formatDuration(minutes: number): string {
-  if (minutes < 1) return '< 1 分钟'
-  if (minutes < 60) return `${Math.round(minutes)} 分钟`
+  if (minutes < 1) return `< 1 ${t('stats.minutes')}`
+  if (minutes < 60) return `${Math.round(minutes)} ${t('stats.minutes')}`
   const h = Math.floor(minutes / 60)
   const m = Math.round(minutes % 60)
   return `${h}h ${m}m`
@@ -75,19 +78,19 @@ function formatDuration(minutes: number): string {
       <!-- Header -->
       <div class="flex items-center justify-between mb-6">
         <div>
-          <h1 class="text-xl font-bold text-gray-100">📊 Agent 统计</h1>
-          <p class="text-gray-500 text-sm mt-1">各 agent 任务完成情况与平均耗时</p>
+          <h1 class="text-xl font-bold text-gray-100">📊 {{ t('stats.title') }}</h1>
+          <p class="text-gray-500 text-sm mt-1">{{ t('stats.subtitle') }}</p>
         </div>
         <button
           class="text-sm text-gray-500 hover:text-gray-300 disabled:opacity-40"
           :disabled="loading"
           @click="load"
-        >⟳ 刷新</button>
+        >⟳</button>
       </div>
 
-      <div v-if="loading" class="text-gray-600 text-center py-20">加载中…</div>
+      <div v-if="loading" class="text-gray-600 text-center py-20">{{ t('common.loading') }}</div>
       <div v-else-if="error" class="p-3 bg-red-900/40 border border-red-500 rounded text-red-300 text-sm">{{ error }}</div>
-      <div v-else-if="!stats.length" class="text-gray-600 text-center py-20">暂无数据</div>
+      <div v-else-if="!stats.length" class="text-gray-600 text-center py-20">{{ t('stats.noData') }}</div>
 
       <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         <div
@@ -101,14 +104,14 @@ function formatDuration(minutes: number): string {
             <span class="text-2xl">{{ agentIcon(s.agent) }}</span>
             <div>
               <div class="font-semibold text-gray-100">{{ s.agent }}</div>
-              <div class="text-xs text-gray-500">{{ s.total_tasks }} 个任务</div>
+              <div class="text-xs text-gray-500">{{ s.total_tasks }} {{ t('stats.totalTasks') }}</div>
             </div>
           </div>
 
           <!-- Success rate progress bar -->
           <div class="mb-4">
             <div class="flex items-center justify-between text-xs text-gray-500 mb-1.5">
-              <span>完成率</span>
+              <span>{{ t('stats.successRate') }}</span>
               <span :class="s.success_rate >= 80 ? 'text-green-400' : s.success_rate >= 50 ? 'text-yellow-400' : 'text-red-400'">
                 {{ s.success_rate.toFixed(0) }}%
               </span>
@@ -126,17 +129,17 @@ function formatDuration(minutes: number): string {
           <div class="grid grid-cols-3 gap-2 text-center">
             <div class="bg-gray-800/60 rounded-lg py-2">
               <div class="text-base font-bold text-green-400">{{ s.done_count }}</div>
-              <div class="text-[10px] text-gray-500 mt-0.5">完成</div>
+              <div class="text-[10px] text-gray-500 mt-0.5">{{ t('stats.done') }}</div>
             </div>
             <div class="bg-gray-800/60 rounded-lg py-2">
               <div class="text-base font-bold text-red-400">{{ s.failed_count }}</div>
-              <div class="text-[10px] text-gray-500 mt-0.5">失败</div>
+              <div class="text-[10px] text-gray-500 mt-0.5">{{ t('stats.failed') }}</div>
             </div>
             <div class="bg-gray-800/60 rounded-lg py-2">
               <div class="text-sm font-bold text-gray-300">
                 {{ s.avg_duration_minutes > 0 ? formatDuration(s.avg_duration_minutes) : '—' }}
               </div>
-              <div class="text-[10px] text-gray-500 mt-0.5">平均耗时</div>
+              <div class="text-[10px] text-gray-500 mt-0.5">{{ t('stats.avgDuration') }}</div>
             </div>
           </div>
         </div>
