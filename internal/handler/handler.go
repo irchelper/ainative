@@ -282,6 +282,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/timeline/", h.handleAPITimeline)
 	mux.HandleFunc("/api/chains", h.handleAPIChains)
 	mux.HandleFunc("/api/config", h.handleAPIConfig)
+	// V15: Task Templates.
+	h.registerTemplateRoutes(mux)
 }
 
 // -------------------------------------------------------------------

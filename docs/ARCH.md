@@ -1118,3 +1118,110 @@ web:
 | OpenAPI spec 与代码不同步 | 中 | CI 中加 spec 校验步骤（响应 schema 匹配测试）|
 | handler.go 膨胀 | 低 | 当前 962→~1160 行，<1500 行红线不拆；超线再拆 |
 | Tailwind v4 breaking change | 低 | v4 已稳定；锁 package-lock.json 版本 |
+
+---
+
+## V13 — autoAdvance 条件分支（2026-02-27）
+
+> commit: `319f948`
+
+### 设计动机
+
+autoRetry 解决了失败路径的自动路由（fail → retry agent），但成功路径仍需 CEO 手动推进下一步。V13 补全成功路径：任务完成后自动派发下一任务，无需 CEO 介入。
+
+**与 autoRetry 的对称关系：**
+
+| 机制 | 触发条件 | 行为 |
+|------|---------|------|
+| autoRetry | PATCH status=failed | 自动创建 retry task → dispatch 到 retry_assigned_to |
+| autoAdvance | PATCH status=done | 自动创建 next task → dispatch 到 auto_advance_to |
+
+### 新增 Schema 字段（+3）
+
+```sql
+ALTER TABLE tasks ADD COLUMN auto_advance_to VARCHAR NULL;
+    -- 目标 agent 名，非空时触发 autoAdvance
+ALTER TABLE tasks ADD COLUMN advance_task_title VARCHAR NULL;
+    -- 下一任务标题（空则自动生成："{原标题} [auto-advance]"）
+ALTER TABLE tasks ADD COLUMN advance_task_description TEXT NULL;
+    -- 下一任务描述模板（上游 result 自动注入前缀）
+```
+
+### 触发逻辑（handler.go patchTask）
+
+```
+PATCH status=done
+  ↓
+task.auto_advance_to != "" ?
+  ↓ Yes
+  创建新 task：
+    assigned_to = auto_advance_to
+    title       = advance_task_title ??（原 title + " [auto-advance]"）
+    description = "上游结果：{task.result}\n\n" + advance_task_description
+    chain_id    = 原 chain_id（继承链路）
+    notify_ceo_on_complete = 原值（继承）
+  ↓
+  SessionNotifier.Dispatch(auto_advance_to)  // 唤醒目标 agent
+```
+
+**上游 result 注入：** 下一任务 description 自动以 `"上游结果：{result}\n\n"` 开头，确保下游 agent 拿到完整上下文，无需 CEO 手动传递。
+
+### 与 dispatch/chain 的关系
+
+| 场景 | 推荐方式 |
+|------|---------|
+| 完整链路已知（A→B→C） | `POST /dispatch/chain`（一次性创建，最清晰）|
+| 动态分支（A 完成后根据 result 决定下一步）| autoAdvance / result routing（V14）|
+| 单步任务 | `POST /dispatch` 或 `POST /tasks` |
+
+---
+
+## V14 — 结构化 result 路由（2026-02-27）
+
+> commit: `8e9b5a3`
+
+### 设计动机
+
+autoAdvance（V13）在任务创建时静态指定下一 agent。V14 允许专家在 PATCH done 时通过 result 动态决定路由，适合需要"根据结果决定下一步"的场景。
+
+### 触发机制
+
+专家 PATCH done 时，`result` 字段包含合法 JSON 且含 `next_agent` 字段：
+
+```json
+{
+  "summary": "架构方案完成，建议立即进入实现阶段",
+  "next_agent": "coder",
+  "next_title": "实现 autoAdvance feature",
+  "next_description": "基于架构方案实现 V13 autoAdvance..."
+}
+```
+
+Go server 解析 result：
+1. `next_agent` 存在且为已知 agent → 自动创建 next task + dispatch
+2. `next_title` / `next_description` 可选，缺省时自动生成
+3. 原 result 原样保存（JSON 字符串），不丢失可读内容
+
+### 优先级规则
+
+```
+autoAdvance（V13）优先 > result routing（V14）
+```
+
+若任务同时设置了 `auto_advance_to` 且 result 含 `next_agent`：
+- 执行 autoAdvance（静态配置优先）
+- result routing 被忽略
+- 日志记录：`[handler] autoAdvance takes precedence over result routing for task {id}`
+
+### 两者可共存的场景
+
+| 任务配置 | 行为 |
+|---------|------|
+| 只有 auto_advance_to | 固定路由到指定 agent |
+| 只有 result JSON | 动态路由（由专家决定）|
+| 两者都有 | autoAdvance 优先，result routing 忽略 |
+| 两者都没有 | 不自动推进，依赖 CEO 或 dispatch/chain |
+
+### result 字段兼容性
+
+非 JSON result（普通字符串）完全兼容，Go server 尝试 JSON parse 失败后直接跳过 result routing，行为与 V13 前一致。

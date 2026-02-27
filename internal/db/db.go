@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS task_history (
   note        TEXT NOT NULL DEFAULT '',
   changed_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS templates (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  tasks_json  TEXT NOT NULL DEFAULT '[]',
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // Open initialises the SQLite database at path and runs schema migrations.
@@ -118,6 +127,11 @@ func Open(path string) (*sql.DB, error) {
 	if err = addRetryRoutingRules(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("add retry_routing rules: %w", err)
+	}
+
+	if err = seedTemplates(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("seed templates: %w", err)
 	}
 
 	return db, nil
@@ -231,4 +245,38 @@ func addRetryRoutingRules(db *sql.DB) error {
 // Ping verifies the database connection is alive.
 func Ping(db *sql.DB) error {
 	return db.Ping()
+}
+
+// seedTemplates inserts built-in template definitions (idempotent via INSERT OR IGNORE).
+func seedTemplates(db *sql.DB) error {
+	seeds := []struct {
+		name  string
+		desc  string
+		tasks string
+	}{
+		{
+			"fix-qa-deploy",
+			"修复→QA验证→部署 标准三步链",
+			`[{"assigned_to":"coder","title":"修复：{goal}","description":"实现修复"},{"assigned_to":"qa","title":"QA验证：{goal}","description":"验证修复结果"},{"assigned_to":"devops","title":"部署：{goal}","description":"发布到生产"}]`,
+		},
+		{
+			"doc-review",
+			"文档撰写→架构审核 两步链",
+			`[{"assigned_to":"writer","title":"撰写文档：{goal}","description":"编写{goal}相关文档"},{"assigned_to":"thinker","title":"审核文档：{goal}","description":"审核文档质量和准确性"}]`,
+		},
+		{
+			"feature",
+			"需求→实现→审核→QA→部署 完整五步链",
+			`[{"assigned_to":"pm","title":"需求分析：{goal}","description":"拆解{goal}需求"},{"assigned_to":"coder","title":"实现：{goal}","description":"按需求实现功能"},{"assigned_to":"thinker","title":"架构审核：{goal}","description":"审核实现方案"},{"assigned_to":"qa","title":"QA测试：{goal}","description":"测试功能"},{"assigned_to":"devops","title":"部署：{goal}","description":"发布上线"}]`,
+		},
+	}
+	for _, s := range seeds {
+		if _, err := db.Exec(
+			`INSERT OR IGNORE INTO templates (name, description, tasks_json) VALUES (?, ?, ?)`,
+			s.name, s.desc, s.tasks,
+		); err != nil {
+			return fmt.Errorf("seed template %q: %w", s.name, err)
+		}
+	}
+	return nil
 }

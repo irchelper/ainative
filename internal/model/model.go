@@ -235,3 +235,40 @@ type SummaryResponse struct {
 	DoneToday  int           `json:"done_today"`
 	Tasks      []SummaryTask `json:"tasks"`
 }
+
+// -------------------------------------------------------------------
+// V15: Task Templates
+// -------------------------------------------------------------------
+
+// TemplateTaskSpec is one task entry stored in a template.
+type TemplateTaskSpec struct {
+	AssignedTo     string `json:"assigned_to"`
+	Title          string `json:"title"`
+	Description    string `json:"description,omitempty"`
+	RequiresReview bool   `json:"requires_review,omitempty"`
+	Priority       int    `json:"priority,omitempty"`
+}
+
+// Template defines a reusable chain/task pattern.
+type Template struct {
+	ID          int64              `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Tasks       []TemplateTaskSpec `json:"tasks"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   time.Time          `json:"updated_at"`
+}
+
+// CreateTemplateRequest is the body for POST /templates.
+type CreateTemplateRequest struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	Tasks       []TemplateTaskSpec `json:"tasks"`
+}
+
+// DispatchFromTemplateRequest is the body for POST /dispatch/from-template/:name.
+type DispatchFromTemplateRequest struct {
+	Vars                map[string]string `json:"vars"`
+	NotifyCEOOnComplete bool              `json:"notify_ceo_on_complete"`
+	ChainTitle          string            `json:"chain_title"`
+}
