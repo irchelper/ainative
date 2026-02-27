@@ -14,6 +14,7 @@ const navItems = [
   { path: '/goals/new', label: '目标输入', icon: '🎯' },
   { path: '/goals', label: '目标追踪', icon: '📈' },
   { path: '/kanban', label: '看板', icon: '📋' },
+  { path: '/graph', label: 'DAG', icon: '🕸' },
 ]
 
 function isActive(path: string) {

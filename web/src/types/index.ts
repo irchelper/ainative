@@ -14,6 +14,7 @@ export interface Task {
   description?: string
   status: TaskStatus
   assigned_to: string
+  depends_on?: string[]
   retry_assigned_to?: string
   superseded_by?: string
   chain_id?: string

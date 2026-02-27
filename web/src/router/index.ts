@@ -25,6 +25,11 @@ const router = createRouter({
       name: 'task-detail',
       component: () => import('@/pages/TaskDetailPage.vue'),
     },
+    {
+      path: '/graph',
+      name: 'graph',
+      component: () => import('@/pages/GraphVisualizationPage.vue'),
+    },
   ],
 })
 

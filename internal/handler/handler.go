@@ -355,6 +355,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/api/events", h.hub)
 	// V18: Graph dispatch.
 	h.registerGraphRoutes(mux)
+	// V20: API docs + graph endpoint.
+	mux.HandleFunc("/docs", h.handleDocs)
+	mux.HandleFunc("/openapi.json", h.handleOpenAPISpec)
+	mux.HandleFunc("/api/graph/", h.handleAPIGraph)
 }
 
 // -------------------------------------------------------------------
@@ -1457,4 +1461,42 @@ func (h *Handler) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, Response{Agents: agents, Version: "v12"})
+}
+
+// handleAPIGraph serves GET /api/graph/:chain_id.
+// Returns all tasks in the chain with their depends_on lists for DAG visualization.
+func (h *Handler) handleAPIGraph(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	chainID := strings.TrimPrefix(r.URL.Path, "/api/graph/")
+	if chainID == "" {
+		writeError(w, http.StatusBadRequest, "missing chain_id")
+		return
+	}
+
+	// Fetch tasks for the chain.
+	tasks, err := h.store.GetChainTasks(chainID)
+	if err != nil {
+		handleStoreError(w, err)
+		return
+	}
+
+	// Enrich each task with its depends_on list.
+	enriched := make([]model.Task, 0, len(tasks))
+	for _, t := range tasks {
+		full, err := h.store.GetByID(t.ID)
+		if err != nil {
+			enriched = append(enriched, t) // fallback: no deps
+			continue
+		}
+		enriched = append(enriched, full)
+	}
+
+	type GraphData struct {
+		ChainID string       `json:"chain_id"`
+		Tasks   []model.Task `json:"tasks"`
+	}
+	writeJSON(w, http.StatusOK, GraphData{ChainID: chainID, Tasks: enriched})
 }
