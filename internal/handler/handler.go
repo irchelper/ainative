@@ -29,6 +29,9 @@ type Handler struct {
 	oc       *openclaw.Client
 	db       *sql.DB
 
+	// SSE hub for real-time push to browser clients.
+	hub *SSEHub
+
 	// stale ticker fields
 	staleStop          chan struct{}
 	staleWG            sync.WaitGroup
@@ -47,11 +50,12 @@ func New(db *sql.DB, s *store.Store, n notify.Notifier, oc *openclaw.Client) *Ha
 		sn = notify.NewSessionNotifier(oc, "")
 	}
 	return &Handler{
-		store:          s,
-		notifier:       n,
-		sessionN:       sn,
-		oc:             oc,
-		db:             db,
+		store:               s,
+		notifier:            n,
+		sessionN:            sn,
+		oc:                  oc,
+		db:                  db,
+		hub:                 NewSSEHub(),
 		staleStop:           make(chan struct{}),
 		staleInterval:       envDuration("AGENT_QUEUE_STALE_CHECK_INTERVAL", 10*time.Minute),
 		staleThreshold:      envDuration("AGENT_QUEUE_STALE_THRESHOLD", 30*time.Minute),
@@ -347,6 +351,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config", h.handleAPIConfig)
 	// V15: Task Templates.
 	h.registerTemplateRoutes(mux)
+	// V17: SSE real-time updates.
+	mux.Handle("/api/events", h.hub)
 }
 
 // -------------------------------------------------------------------
@@ -410,6 +416,9 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// V17: broadcast task_created event.
+	h.hub.Broadcast(SSEEvent{Type: "task_created", TaskID: task.ID, Status: string(task.Status)})
 
 	// Notify expert via sessions_send (fire-and-forget; failure does not
 	// affect the HTTP response for task creation).
@@ -496,6 +505,11 @@ func (h *Handler) handleDispatchChain(w http.ResponseWriter, r *http.Request) {
 		FirstDispatched: first.ID,
 	}
 	_ = req.ChainTitle // stored in tasks; not in ChainResponse currently
+
+	// V17: broadcast task_created for each task in the chain.
+	for _, t := range created {
+		h.hub.Broadcast(SSEEvent{Type: "task_created", TaskID: t.ID, Status: string(t.Status)})
+	}
 
 	sessionKey, known := openclaw.SessionKey(first.AssignedTo)
 	if !known {
@@ -663,6 +677,13 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 		handleStoreError(w, err)
 		return
 	}
+
+	// V17: broadcast SSE event to all connected browser clients.
+	h.hub.Broadcast(SSEEvent{
+		Type:   "task_updated",
+		TaskID: task.ID,
+		Status: string(task.Status),
+	})
 
 	// F6: async notification.
 	// done → Discord webhook (user @mention) + V8: triggered dispatch + chain complete check.

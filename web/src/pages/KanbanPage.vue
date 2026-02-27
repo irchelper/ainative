@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { usePolling } from '@/composables/usePolling'
+import { useSSE } from '@/composables/useSSE'
 import { api } from '@/api/client'
 import type { Task, TaskStatus } from '@/types'
 
@@ -13,6 +14,9 @@ async function fetchTasks() {
 }
 
 const { loading, error, refresh } = usePolling(fetchTasks, 60_000)
+
+// V17: SSE real-time updates — refresh board on any task event.
+const { connected: sseConnected } = useSSE(() => fetchTasks(), { fallbackInterval: 60_000 })
 
 const columns: { key: TaskStatus; label: string; color: string }[] = [
   { key: 'pending', label: '待处理', color: 'text-yellow-400' },
@@ -69,11 +73,18 @@ function cardClass(task: Task): string {
           <h1 class="text-xl font-bold text-gray-100">📋 看板</h1>
           <p class="text-gray-500 text-sm mt-1">全局任务审计视图</p>
         </div>
-        <button
-          class="text-sm text-gray-500 hover:text-gray-300 disabled:opacity-40"
-          :disabled="loading"
-          @click="refresh"
-        >⟳ 刷新</button>
+        <div class="flex items-center gap-3">
+          <span
+            class="text-xs"
+            :class="sseConnected ? 'text-green-500' : 'text-gray-600'"
+            :title="sseConnected ? 'SSE 实时连接' : 'SSE 未连接（轮询兜底）'"
+          >{{ sseConnected ? '🟢 实时' : '⚪ 轮询' }}</span>
+          <button
+            class="text-sm text-gray-500 hover:text-gray-300 disabled:opacity-40"
+            :disabled="loading"
+            @click="refresh"
+          >⟳ 刷新</button>
+        </div>
       </div>
 
       <div v-if="error" class="mb-4 p-3 bg-red-900/40 border border-red-500 rounded text-sm text-red-300">{{ error }}</div>

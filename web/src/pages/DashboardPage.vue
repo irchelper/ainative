@@ -3,11 +3,15 @@ import { computed, ref } from 'vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useDashboardStore } from '@/stores/dashboardStore'
 import { usePolling } from '@/composables/usePolling'
+import { useSSE } from '@/composables/useSSE'
 import { api } from '@/api/client'
 import type { Task } from '@/types'
 
 const store = useDashboardStore()
 const { loading, error, refresh } = usePolling(() => store.fetch(), 10_000)
+
+// V17: SSE real-time updates — refresh dashboard on any task event.
+useSSE(() => store.fetch(), { fallbackInterval: 10_000 })
 
 // Human todo tasks (assigned_to === 'human')
 const humanTodos = computed(() =>
