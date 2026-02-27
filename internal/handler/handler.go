@@ -656,6 +656,10 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 		// When auto_advance_to is set, automatically create and dispatch the next task.
 		if task.AutoAdvanceTo != "" {
 			h.autoAdvance(task)
+		} else {
+			// V14 result routing: parse result JSON for next_agent directive.
+			// Only fires when auto_advance_to is NOT set (autoAdvance takes priority).
+			h.resultRouting(task)
 		}
 	}
 
@@ -830,6 +834,66 @@ func (h *Handler) autoRetryReviewReject(original, origDetail model.Task, retryAg
 	// Dispatch only the fix task; re-review will be dispatched automatically
 	// when fix task reaches 'done' (unlockDependents → triggered → SessionNotifier.Dispatch).
 	h.dispatchToAgent(retryAgent, fixTask.ID)
+}
+
+// resultRouting parses task.Result as JSON and dispatches a follow-up task if
+// the result contains a next_agent field.
+//
+// JSON schema (all fields optional except next_agent):
+//
+//	{ "next_agent": "qa", "next_title": "QA验证", "next_description": "..." }
+//
+// If next_title is omitted, defaults to "result-route: <original.Title>".
+// If next_description is omitted, upstream result is used as context.
+// Invalid JSON or missing next_agent → silently skipped (no error).
+// autoAdvance (auto_advance_to) takes priority; resultRouting is only called
+// when auto_advance_to is empty.
+func (h *Handler) resultRouting(original model.Task) {
+	if original.Result == "" {
+		return
+	}
+	var parsed struct {
+		NextAgent       string `json:"next_agent"`
+		NextTitle       string `json:"next_title"`
+		NextDescription string `json:"next_description"`
+	}
+	if err := json.Unmarshal([]byte(original.Result), &parsed); err != nil {
+		// Not JSON or malformed – silently skip.
+		return
+	}
+	if parsed.NextAgent == "" {
+		return
+	}
+
+	go func() {
+		title := parsed.NextTitle
+		if title == "" {
+			title = "result-route: " + original.Title
+		}
+		desc := parsed.NextDescription
+		upstreamResult := original.Result
+		if desc != "" {
+			desc = "前置结果：" + upstreamResult + "\n\n" + desc
+		} else {
+			desc = "前置结果：" + upstreamResult
+		}
+
+		newTask, err := h.store.CreateTask(model.CreateTaskRequest{
+			Title:               title,
+			AssignedTo:          parsed.NextAgent,
+			Description:         desc,
+			Priority:            original.Priority,
+			ChainID:             original.ChainID,
+			NotifyCEOOnComplete: original.NotifyCEOOnComplete,
+		})
+		if err != nil {
+			log.Printf("[handler] resultRouting CreateTask failed for original %s: %v", original.ID, err)
+			return
+		}
+		log.Printf("[handler] resultRouting: created task %s for agent %s (original: %s)",
+			newTask.ID, parsed.NextAgent, original.ID)
+		h.dispatchToAgent(parsed.NextAgent, newTask.ID)
+	}()
 }
 
 // autoAdvance creates and dispatches the next task when a task completes with

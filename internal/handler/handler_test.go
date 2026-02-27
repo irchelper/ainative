@@ -2938,3 +2938,243 @@ func TestV13_AutoAdvance_CreatesNextTask(t *testing.T) {
 		t.Errorf("description missing 前置结果 prefix; desc=%q", found.Description)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// V14: resultRouting tests
+// ---------------------------------------------------------------------------
+
+// TestV14_ResultRouting_PlainText verifies that plain-text result does not trigger routing.
+func TestV14_ResultRouting_PlainText(t *testing.T) {
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	dispR := postJSON(t, srv, "/dispatch", map[string]any{
+		"title":       "v14-plain-text",
+		"assigned_to": "coder",
+	})
+	var dispResp struct{ Task model.Task }
+	json.NewDecoder(dispR.Body).Decode(&dispResp)
+	dispR.Body.Close()
+	task := dispResp.Task
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
+		map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed)
+	claimR.Body.Close()
+	ip := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	// PATCH done with plain-text result
+	body, _ := json.Marshal(map[string]any{
+		"status":  "done",
+		"result":  "完成了，无需路由",
+		"version": ip.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, _ := http.DefaultClient.Do(req)
+	r.Body.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	// No result-route tasks should exist
+	listR := getJSON(t, srv, "/tasks")
+	var listResp struct{ Tasks []model.Task }
+	json.NewDecoder(listR.Body).Decode(&listResp)
+	listR.Body.Close()
+	for _, tt := range listResp.Tasks {
+		if strings.HasPrefix(tt.Title, "result-route:") {
+			t.Errorf("unexpected result-route task: %q", tt.Title)
+		}
+	}
+}
+
+// TestV14_ResultRouting_InvalidJSON verifies that invalid JSON in result does not trigger routing.
+func TestV14_ResultRouting_InvalidJSON(t *testing.T) {
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	dispR := postJSON(t, srv, "/dispatch", map[string]any{
+		"title":       "v14-invalid-json",
+		"assigned_to": "coder",
+	})
+	var dispResp struct{ Task model.Task }
+	json.NewDecoder(dispR.Body).Decode(&dispResp)
+	dispR.Body.Close()
+	task := dispResp.Task
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
+		map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed)
+	claimR.Body.Close()
+	ip := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	body, _ := json.Marshal(map[string]any{
+		"status":  "done",
+		"result":  `{"broken json`,
+		"version": ip.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, _ := http.DefaultClient.Do(req)
+	r.Body.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	listR := getJSON(t, srv, "/tasks")
+	var listResp struct{ Tasks []model.Task }
+	json.NewDecoder(listR.Body).Decode(&listResp)
+	listR.Body.Close()
+	for _, tt := range listResp.Tasks {
+		if strings.HasPrefix(tt.Title, "result-route:") {
+			t.Errorf("unexpected result-route task: %q", tt.Title)
+		}
+	}
+}
+
+// TestV14_ResultRouting_NextAgent verifies that JSON result with next_agent triggers routing.
+func TestV14_ResultRouting_NextAgent(t *testing.T) {
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	const nextAgent = "thinker"
+	const nextTitle = "架构审核"
+	const nextDesc = "请审核实现方案"
+	resultJSON := `{"next_agent":"thinker","next_title":"架构审核","next_description":"请审核实现方案","summary":"coder完成了实现"}`
+
+	dispR := postJSON(t, srv, "/dispatch", map[string]any{
+		"title":       "v14-result-route-source",
+		"assigned_to": "coder",
+	})
+	var dispResp struct{ Task model.Task }
+	json.NewDecoder(dispR.Body).Decode(&dispResp)
+	dispR.Body.Close()
+	task := dispResp.Task
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
+		map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed)
+	claimR.Body.Close()
+	ip := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	body, _ := json.Marshal(map[string]any{
+		"status":  "done",
+		"result":  resultJSON,
+		"version": ip.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, _ := http.DefaultClient.Do(req)
+	r.Body.Close()
+
+	time.Sleep(400 * time.Millisecond)
+
+	// Find the routed task
+	listR := getJSON(t, srv, "/tasks?assigned_to="+nextAgent)
+	var listResp struct{ Tasks []model.Task }
+	json.NewDecoder(listR.Body).Decode(&listResp)
+	listR.Body.Close()
+
+	var found *model.Task
+	for i := range listResp.Tasks {
+		if listResp.Tasks[i].Title == nextTitle {
+			found = &listResp.Tasks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("result-route task %q not found; tasks=%v", nextTitle, listResp.Tasks)
+	}
+	if found.AssignedTo != nextAgent {
+		t.Errorf("assigned_to=%q, want %q", found.AssignedTo, nextAgent)
+	}
+	if !strings.Contains(found.Description, resultJSON) {
+		t.Errorf("description missing upstream result; desc=%q", found.Description)
+	}
+	if !strings.Contains(found.Description, nextDesc) {
+		t.Errorf("description missing next_description; desc=%q", found.Description)
+	}
+	if !strings.Contains(found.Description, "前置结果：") {
+		t.Errorf("description missing 前置结果 prefix; desc=%q", found.Description)
+	}
+}
+
+// TestV14_ResultRouting_AutoAdvancePriority verifies that autoAdvance takes priority
+// over result routing when auto_advance_to is set.
+func TestV14_ResultRouting_AutoAdvancePriority(t *testing.T) {
+	mockOC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer mockOC.Close()
+	oc := openclaw.NewWithURL(mockOC.URL, "")
+	srv := newTestServer(t, oc)
+	defer srv.Close()
+
+	// Task with both auto_advance_to and JSON result with next_agent
+	dispR := postJSON(t, srv, "/dispatch", map[string]any{
+		"title":              "v14-priority-test",
+		"assigned_to":        "coder",
+		"auto_advance_to":    "qa",
+		"advance_task_title": "QA阶段",
+	})
+	var dispResp struct{ Task model.Task }
+	json.NewDecoder(dispR.Body).Decode(&dispResp)
+	dispR.Body.Close()
+	task := dispResp.Task
+
+	claimR := postJSON(t, srv, "/tasks/"+task.ID+"/claim",
+		map[string]any{"version": task.Version, "agent": "coder"})
+	var claimed model.Task
+	json.NewDecoder(claimR.Body).Decode(&claimed)
+	claimR.Body.Close()
+	ip := patchTaskTo(t, srv, task.ID, "in_progress", claimed.Version)
+
+	// Result also contains next_agent (should be ignored)
+	body, _ := json.Marshal(map[string]any{
+		"status":  "done",
+		"result":  `{"next_agent":"thinker","next_title":"不应该被创建"}`,
+		"version": ip.Version,
+	})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/tasks/"+task.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, _ := http.DefaultClient.Do(req)
+	r.Body.Close()
+
+	time.Sleep(400 * time.Millisecond)
+
+	// Only the autoAdvance task (QA阶段) should exist, NOT the result-route task
+	listR := getJSON(t, srv, "/tasks")
+	var listResp struct{ Tasks []model.Task }
+	json.NewDecoder(listR.Body).Decode(&listResp)
+	listR.Body.Close()
+
+	foundAdvance := false
+	for _, tt := range listResp.Tasks {
+		if tt.Title == "QA阶段" {
+			foundAdvance = true
+		}
+		if tt.Title == "不应该被创建" || strings.HasPrefix(tt.Title, "result-route:") {
+			t.Errorf("result-route task should NOT be created when auto_advance_to is set; found: %q", tt.Title)
+		}
+	}
+	if !foundAdvance {
+		t.Errorf("autoAdvance task 'QA阶段' not found; tasks=%v", listResp.Tasks)
+	}
+}
