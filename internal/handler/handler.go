@@ -353,6 +353,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	h.registerTemplateRoutes(mux)
 	// V17: SSE real-time updates.
 	mux.Handle("/api/events", h.hub)
+	// V18: Graph dispatch.
+	h.registerGraphRoutes(mux)
 }
 
 // -------------------------------------------------------------------
@@ -548,6 +550,7 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	status := q.Get("status")
 	assignedTo := q.Get("assigned_to")
 	parentID := q.Get("parent_id")
+	search := q.Get("search")
 
 	var depsMetFilter *bool
 	if dm := q.Get("deps_met"); dm != "" {
@@ -555,7 +558,7 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		depsMetFilter = &b
 	}
 
-	tasks, err := h.store.ListTasks(status, assignedTo, parentID, depsMetFilter)
+	tasks, err := h.store.ListTasksSearch(status, assignedTo, parentID, search, depsMetFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

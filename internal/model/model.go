@@ -272,3 +272,40 @@ type DispatchFromTemplateRequest struct {
 	NotifyCEOOnComplete bool              `json:"notify_ceo_on_complete"`
 	ChainTitle          string            `json:"chain_title"`
 }
+
+// -------------------------------------------------------------------
+// V18: /dispatch/graph
+// -------------------------------------------------------------------
+
+// GraphNodeSpec describes a single node (task) in a DAG submission.
+type GraphNodeSpec struct {
+	// Key is a caller-chosen identifier used in edges; not stored.
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	AssignedTo  string `json:"assigned_to"`
+	Description string `json:"description"`
+	Priority    int    `json:"priority"`
+	RequiresReview bool `json:"requires_review"`
+}
+
+// GraphEdge expresses a dependency: task at To depends on task at From.
+type GraphEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// GraphRequest is the body for POST /dispatch/graph.
+type GraphRequest struct {
+	Nodes               []GraphNodeSpec `json:"nodes"`
+	Edges               []GraphEdge     `json:"edges"`
+	NotifyCEOOnComplete bool            `json:"notify_ceo_on_complete"`
+}
+
+// GraphResponse is returned by POST /dispatch/graph.
+type GraphResponse struct {
+	// NodeIDMap maps each node Key to its created task ID.
+	NodeIDMap map[string]string `json:"node_id_map"`
+	Tasks     []Task            `json:"tasks"`
+	// FirstDispatched holds the IDs of all tasks with no pending dependencies (roots).
+	FirstDispatched []string `json:"first_dispatched"`
+}

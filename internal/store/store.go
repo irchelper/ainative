@@ -79,7 +79,18 @@ func (s *Store) CreateTask(req model.CreateTaskRequest) (model.Task, error) {
 // -------------------------------------------------------------------
 
 // ListTasks returns tasks filtered by optional query parameters.
+// ListTasks returns tasks matching the given filters.
+// search is a substring match on title/description (empty = no filter).
 func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bool) ([]model.Task, error) {
+	return s.listTasksInternal(status, assignedTo, parentID, "", depsMetFilter)
+}
+
+// ListTasksSearch is like ListTasks but adds a fuzzy text search on title and description.
+func (s *Store) ListTasksSearch(status, assignedTo, parentID, search string, depsMetFilter *bool) ([]model.Task, error) {
+	return s.listTasksInternal(status, assignedTo, parentID, search, depsMetFilter)
+}
+
+func (s *Store) listTasksInternal(status, assignedTo, parentID, search string, depsMetFilter *bool) ([]model.Task, error) {
 	where := []string{"1=1"}
 	args := []any{}
 
@@ -94,6 +105,11 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 	if parentID != "" {
 		where = append(where, "t.parent_id = ?")
 		args = append(args, parentID)
+	}
+	if search != "" {
+		where = append(where, "(t.title LIKE ? OR t.description LIKE ?)")
+		like := "%" + search + "%"
+		args = append(args, like, like)
 	}
 
 	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.superseded_by,
