@@ -2,13 +2,17 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/layouts/AppLayout.vue'
+import KeyboardHelpModal from '@/components/KeyboardHelpModal.vue'
 import { useDashboardStore } from '@/stores/dashboardStore'
 import { usePolling } from '@/composables/usePolling'
 import { useSSE } from '@/composables/useSSE'
+import { useExport } from '@/composables/useExport'
+import { useKeyboardNav } from '@/composables/useKeyboardNav'
 import { api } from '@/api/client'
 import type { Task } from '@/types'
 
 const { t } = useI18n()
+const { exportTasks } = useExport()
 
 const store = useDashboardStore()
 const { loading, error, refresh } = usePolling(() => store.fetch(), 10_000)
@@ -63,6 +67,19 @@ const todoCount = computed(() => humanTodos.value.length)
 const exceptionCount = computed(() => exceptions.value.length)
 
 const actingIds = ref<Set<string>>(new Set())
+
+// V26-A: keyboard navigation on exception list
+const { selectedIndex: kbIndex, showHelp: showKbHelp } = useKeyboardNav(
+  () => exceptions.value,
+  async (id, data) => { await patchTask(id, data) }
+)
+
+// V26-A: export format dropdown
+const exportMenuOpen = ref(false)
+const allVisibleTasks = computed(() => [
+  ...(store.data?.todo ?? []),
+  ...exceptions.value,
+])
 
 // Countdown helper: returns remaining time string or null
 function countdownStr(task: Task): string | null {
@@ -195,6 +212,9 @@ async function bulkAction(action: 'cancel' | 'reassign') {
 
 <template>
   <AppLayout>
+    <!-- V26-A: keyboard help modal -->
+    <KeyboardHelpModal :show="showKbHelp" @close="showKbHelp = false" />
+
     <!-- Error banner -->
     <div
       v-if="error"
@@ -349,6 +369,33 @@ async function bulkAction(action: 'cancel' | 'reassign') {
               class="bg-red-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full"
             >{{ exceptionCount }}</span>
           </div>
+          <!-- V26-A: export dropdown -->
+          <div class="relative flex items-center gap-2">
+            <button
+              class="text-xs text-gray-500 hover:text-white px-1 py-1"
+              title="键盘快捷键 (?)"
+              @click="showKbHelp = !showKbHelp"
+            >⌨️</button>
+            <div class="relative">
+              <button
+                class="text-xs bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-colors"
+                @click="exportMenuOpen = !exportMenuOpen"
+              >⬇ 导出</button>
+              <div
+                v-if="exportMenuOpen"
+                class="absolute right-0 top-8 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-10 py-1 w-32"
+              >
+                <button
+                  class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                  @click="exportTasks(allVisibleTasks, 'csv'); exportMenuOpen = false"
+                >📄 导出 CSV</button>
+                <button
+                  class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                  @click="exportTasks(allVisibleTasks, 'json'); exportMenuOpen = false"
+                >📦 导出 JSON</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- V22: Bulk toolbar -->
@@ -389,12 +436,16 @@ async function bulkAction(action: 'cancel' | 'reassign') {
           </div>
 
           <div
-            v-for="task in exceptions"
+            v-for="(task, idx) in exceptions"
             :key="task.id"
+            :data-keyboard-index="idx"
             class="bg-gray-900 border rounded-xl p-4 transition-colors cursor-pointer"
-            :class="selectedIds.has(task.id)
-              ? 'border-blue-500/50 bg-blue-500/5'
-              : 'border-gray-700/60 hover:border-red-500/30'"
+            :class="[
+              selectedIds.has(task.id)
+                ? 'border-blue-500/50 bg-blue-500/5'
+                : 'border-gray-700/60 hover:border-red-500/30',
+              kbIndex === idx ? 'ring-2 ring-blue-500' : '',
+            ]"
             @click="$router.push(`/tasks/${task.id}`)"
           >
             <div class="flex items-start gap-3 mb-2">
