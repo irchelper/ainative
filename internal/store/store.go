@@ -36,11 +36,14 @@ func (s *Store) CreateTask(req model.CreateTaskRequest) (model.Task, error) {
 	_, err = tx.Exec(`
 		INSERT INTO tasks (id, title, description, status, assigned_to, retry_assigned_to,
 		                   chain_id, notify_ceo_on_complete,
-		                   parent_id, mode, requires_review, priority, version, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+		                   parent_id, mode, requires_review, priority, version,
+		                   timeout_minutes, timeout_action,
+		                   created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
 		id, req.Title, req.Description, req.AssignedTo, req.RetryAssignedTo,
 		req.ChainID, boolToInt(req.NotifyCEOOnComplete),
 		req.ParentID, req.Mode, boolToInt(req.RequiresReview), req.Priority,
+		req.TimeoutMinutes, req.TimeoutAction,
 		now, now)
 	if err != nil {
 		return model.Task{}, fmt.Errorf("insert task: %w", err)
@@ -93,7 +96,8 @@ func (s *Store) ListTasks(status, assignedTo, parentID string, depsMetFilter *bo
 
 	query := `SELECT t.id, t.title, t.description, t.status, t.assigned_to, t.retry_assigned_to, t.superseded_by,
 	                 t.chain_id, t.notify_ceo_on_complete, t.stale_dispatch_count, t.parent_id,
-	                 t.mode, t.requires_review, t.result, t.failure_reason, t.version, t.priority, t.started_at, t.created_at, t.updated_at
+	                 t.mode, t.requires_review, t.result, t.failure_reason, t.version, t.priority, t.started_at, t.created_at, t.updated_at,
+				 t.timeout_minutes, t.timeout_action, t.commit_url
 	          FROM tasks t
 	          WHERE ` + strings.Join(where, " AND ") + `
 	          ORDER BY t.created_at ASC`
@@ -142,7 +146,8 @@ func (s *Store) GetByID(id string) (model.Task, error) {
 	row := s.db.QueryRow(`
 		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
 		       chain_id, notify_ceo_on_complete, stale_dispatch_count, parent_id,
-		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
+		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at,
+		       timeout_minutes, timeout_action, commit_url
 		FROM tasks WHERE id = ?`, id)
 
 	t, err := scanTaskRow(row)
@@ -242,7 +247,8 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 	row := tx.QueryRow(`
 		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
 		       chain_id, notify_ceo_on_complete, stale_dispatch_count, parent_id,
-		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
+		       mode, requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at,
+		       timeout_minutes, timeout_action, commit_url
 		FROM tasks WHERE id = ?`, id)
 
 	current, err := scanTaskRow(row)
@@ -315,6 +321,11 @@ func (s *Store) PatchTask(id string, req model.PatchTaskRequest) (model.Task, []
 		// Store retry_assigned_to for future use (not a retry transition yet).
 		setClauses = append(setClauses, "retry_assigned_to = ?")
 		args = append(args, *req.RetryAssignedTo)
+	}
+
+	if req.CommitURL != nil {
+		setClauses = append(setClauses, "commit_url = ?")
+		args = append(args, *req.CommitURL)
 	}
 
 	args = append(args, id)
@@ -459,7 +470,8 @@ func (s *Store) GetChainTasks(chainID string) ([]model.Task, error) {
 	rows, err := s.db.Query(`
 		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
 		       chain_id, notify_ceo_on_complete, stale_dispatch_count, parent_id, mode,
-		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
+		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at,
+		       timeout_minutes, timeout_action, commit_url
 		FROM tasks WHERE chain_id = ?
 		ORDER BY created_at ASC`, chainID)
 	if err != nil {
@@ -688,7 +700,8 @@ func (s *Store) Poll(assignedTo string) (*model.Task, error) {
 	rows, err := s.db.Query(`
 		SELECT id, title, description, status, assigned_to, retry_assigned_to, superseded_by,
 		       chain_id, notify_ceo_on_complete, stale_dispatch_count, parent_id, mode,
-		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at
+		       requires_review, result, failure_reason, version, priority, started_at, created_at, updated_at,
+		       timeout_minutes, timeout_action, commit_url
 		FROM tasks
 		WHERE status = 'pending' AND assigned_to = ?
 		ORDER BY priority DESC, created_at ASC
@@ -834,6 +847,11 @@ func (s *Store) depsFor(id string) ([]string, error) {
 	return deps, rows.Err()
 }
 
+// GetHistory returns the full task_history for a given task ID.
+func (s *Store) GetHistory(id string) ([]model.HistoryItem, error) {
+	return s.historyFor(id)
+}
+
 func (s *Store) historyFor(id string) ([]model.HistoryItem, error) {
 	rows, err := s.db.Query(`
 		SELECT id, task_id, from_status, to_status, changed_by, note, changed_at
@@ -934,7 +952,8 @@ func scanTaskImpl(r taskScanner) (model.Task, error) {
 		&t.StaleDispatchCount,
 		&t.ParentID, &t.Mode, &rr,
 		&t.Result, &t.FailureReason, &t.Version, &t.Priority,
-		&t.StartedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.StartedAt, &t.CreatedAt, &t.UpdatedAt,
+		&t.TimeoutMinutes, &t.TimeoutAction, &t.CommitURL)
 	if err != nil {
 		return model.Task{}, err
 	}

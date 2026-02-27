@@ -16,12 +16,14 @@ import (
 	"github.com/irchelper/agent-queue/internal/notify"
 	"github.com/irchelper/agent-queue/internal/openclaw"
 	"github.com/irchelper/agent-queue/internal/store"
+	"github.com/irchelper/agent-queue/internal/webui"
 )
 
 func main() {
 	var (
-		port   = flag.String("port", envOr("AGENT_QUEUE_PORT", "19827"), "listen port")
-		dbPath = flag.String("db", envOr("AGENT_QUEUE_DB_PATH", "data/queue.db"), "path to SQLite database file")
+		port      = flag.String("port", envOr("AGENT_QUEUE_PORT", "19827"), "listen port")
+		dbPath    = flag.String("db", envOr("AGENT_QUEUE_DB_PATH", "data/queue.db"), "path to SQLite database file")
+		staticDir = flag.String("static-dir", envOr("AGENT_QUEUE_STATIC_DIR", ""), "serve static files from local dir instead of embed.FS (dev mode)")
 	)
 	flag.Parse()
 
@@ -52,6 +54,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	h.Register(mux)
+
+	// Static file serving (SPA with history-mode fallback).
+	// API routes registered via h.Register(mux) take precedence over the catch-all "/".
+	mux.Handle("/", webui.NewHandler(*staticDir))
 
 	addr := "localhost:" + *port
 	srv := &http.Server{

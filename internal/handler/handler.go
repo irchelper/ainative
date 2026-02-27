@@ -207,6 +207,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/retry-routing", h.handleRetryRouting)
 	mux.HandleFunc("/retry-routing/", h.handleRetryRoutingID)
 	mux.HandleFunc("/chains/", h.handleChains)
+	// V12: AI Workbench API endpoints.
+	mux.HandleFunc("/api/dashboard", h.handleAPIDashboard)
+	mux.HandleFunc("/api/timeline/", h.handleAPITimeline)
+	mux.HandleFunc("/api/chains", h.handleAPIChains)
+	mux.HandleFunc("/api/config", h.handleAPIConfig)
 }
 
 // -------------------------------------------------------------------
@@ -968,4 +973,200 @@ func (h *Handler) handleChains(w http.ResponseWriter, r *http.Request) {
 // newChainID generates a unique chain identifier.
 func newChainID() string {
 	return fmt.Sprintf("chain_%x", time.Now().UnixNano())
+}
+
+// =============================================================================
+// V12: AI Workbench API Endpoints
+// =============================================================================
+
+// handleAPIDashboard serves GET /api/dashboard.
+// Returns aggregated stats: pending todo, exceptions (failed/blocked), and counts.
+func (h *Handler) handleAPIDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	all, err := h.store.ListTasks("", "", "", nil)
+	if err != nil {
+		handleStoreError(w, err)
+		return
+	}
+
+	type Stats struct {
+		Total      int `json:"total"`
+		Pending    int `json:"pending"`
+		InProgress int `json:"in_progress"`
+		Done       int `json:"done"`
+		Failed     int `json:"failed"`
+		Blocked    int `json:"blocked"`
+	}
+
+	type Response struct {
+		Todo       []model.Task `json:"todo"`
+		Exceptions []model.Task `json:"exceptions"`
+		Stats      Stats        `json:"stats"`
+	}
+
+	var todo, exceptions []model.Task
+	var stats Stats
+	stats.Total = len(all)
+	for _, t := range all {
+		switch t.Status {
+		case model.StatusPending:
+			stats.Pending++
+			todo = append(todo, t)
+		case model.StatusInProgress, model.StatusClaimed:
+			stats.InProgress++
+		case model.StatusDone:
+			stats.Done++
+		case model.StatusFailed:
+			stats.Failed++
+			exceptions = append(exceptions, t)
+		case model.StatusBlocked:
+			stats.Blocked++
+			exceptions = append(exceptions, t)
+		}
+	}
+	if todo == nil {
+		todo = []model.Task{}
+	}
+	if exceptions == nil {
+		exceptions = []model.Task{}
+	}
+
+	writeJSON(w, http.StatusOK, Response{Todo: todo, Exceptions: exceptions, Stats: stats})
+}
+
+// handleAPITimeline serves GET /api/timeline/:id.
+// Returns task details plus full history (task_history table).
+func (h *Handler) handleAPITimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/timeline/")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "task id required")
+		return
+	}
+
+	task, err := h.store.GetByID(id)
+	if err != nil {
+		handleStoreError(w, err)
+		return
+	}
+
+	type HistoryItem struct {
+		ID         int64     `json:"id"`
+		TaskID     string    `json:"task_id"`
+		FromStatus string    `json:"from_status,omitempty"`
+		ToStatus   string    `json:"to_status"`
+		ChangedBy  string    `json:"changed_by,omitempty"`
+		Note       string    `json:"note,omitempty"`
+		ChangedAt  time.Time `json:"changed_at"`
+	}
+	type Response struct {
+		Task    model.Task    `json:"task"`
+		History []HistoryItem `json:"history"`
+	}
+
+	// Fetch history from store.
+	rawHistory, err := h.store.GetHistory(id)
+	if err != nil {
+		log.Printf("[handler] GetHistory %s: %v", id, err)
+		rawHistory = nil
+	}
+	history := make([]HistoryItem, 0, len(rawHistory))
+	for _, h := range rawHistory {
+		history = append(history, HistoryItem{
+			ID:         h.ID,
+			TaskID:     h.TaskID,
+			FromStatus: h.FromStatus,
+			ToStatus:   h.ToStatus,
+			ChangedBy:  h.ChangedBy,
+			Note:       h.Note,
+			ChangedAt:  h.ChangedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, Response{Task: task, History: history})
+}
+
+// handleAPIChains serves GET /api/chains.
+// Returns all chain groups with their tasks (for goal tracking UI).
+func (h *Handler) handleAPIChains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Get all tasks with a chain_id, then group them.
+	all, err := h.store.ListTasks("", "", "", nil)
+	if err != nil {
+		handleStoreError(w, err)
+		return
+	}
+
+	type ChainGroup struct {
+		ChainID string       `json:"chain_id"`
+		Tasks   []model.Task `json:"tasks"`
+	}
+
+	chainMap := make(map[string]*ChainGroup)
+	chainOrder := []string{}
+	for _, t := range all {
+		if t.ChainID == "" {
+			continue
+		}
+		if _, ok := chainMap[t.ChainID]; !ok {
+			chainMap[t.ChainID] = &ChainGroup{ChainID: t.ChainID}
+			chainOrder = append(chainOrder, t.ChainID)
+		}
+		chainMap[t.ChainID].Tasks = append(chainMap[t.ChainID].Tasks, t)
+	}
+
+	chains := make([]ChainGroup, 0, len(chainOrder))
+	for _, cid := range chainOrder {
+		chains = append(chains, *chainMap[cid])
+	}
+
+	type Response struct {
+		Chains []ChainGroup `json:"chains"`
+	}
+	writeJSON(w, http.StatusOK, Response{Chains: chains})
+}
+
+// handleAPIConfig serves GET /api/config.
+// Returns known agents and server metadata for frontend initialization.
+func (h *Handler) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	type AgentInfo struct {
+		Name  string `json:"name"`
+		Label string `json:"label"`
+	}
+	type Response struct {
+		Agents  []AgentInfo `json:"agents"`
+		Version string      `json:"version"`
+	}
+
+	// Default known agents (can be extended via config in future phases).
+	agents := []AgentInfo{
+		{"coder", "工程师"},
+		{"thinker", "架构师"},
+		{"writer", "文档工程师"},
+		{"devops", "运维工程师"},
+		{"security", "安全工程师"},
+		{"qa", "质量工程师"},
+		{"vision", "视觉验收"},
+		{"uiux", "UI/UX设计师"},
+		{"pm", "产品经理"},
+		{"ops", "研究员"},
+	}
+
+	writeJSON(w, http.StatusOK, Response{Agents: agents, Version: "v12"})
 }

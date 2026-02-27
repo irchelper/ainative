@@ -39,4 +39,6 @@ agent-queue
 
 # Frontend build output
 dist/
+internal/webui/dist/assets/
 web/node_modules/
+server

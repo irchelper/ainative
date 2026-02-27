@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   priority                 INTEGER NOT NULL DEFAULT 0,
   started_at               DATETIME,
   created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  timeout_minutes          INTEGER,
+  timeout_action           VARCHAR,
+  commit_url               VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS retry_routing (
@@ -86,6 +89,10 @@ func Open(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN chain_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN notify_ceo_on_complete INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN stale_dispatch_count INTEGER NOT NULL DEFAULT 0`)
+	// V12: AI Workbench schema extension (+3 fields).
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN timeout_minutes INTEGER`)
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN timeout_action VARCHAR`)
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN commit_url VARCHAR`)
 
 	// Deduplicate retry_routing: keep the earliest row per (assigned_to, error_keyword) pair,
 	// then add a UNIQUE index so INSERT OR IGNORE works correctly going forward.

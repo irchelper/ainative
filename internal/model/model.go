@@ -36,6 +36,9 @@ type Task struct {
 	Version               int        `json:"version"`
 	Priority              int        `json:"priority"`
 	StaleDispatchCount    int        `json:"stale_dispatch_count,omitempty"`
+	TimeoutMinutes        *int       `json:"timeout_minutes,omitempty"`
+	TimeoutAction         *string    `json:"timeout_action,omitempty"`
+	CommitURL             *string    `json:"commit_url,omitempty"`
 	StartedAt             *time.Time `json:"started_at,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
@@ -68,6 +71,8 @@ type CreateTaskRequest struct {
 	Mode                  string   `json:"mode"`
 	RequiresReview        bool     `json:"requires_review"`
 	Priority              int      `json:"priority"`
+	TimeoutMinutes        *int     `json:"timeout_minutes"`
+	TimeoutAction         *string  `json:"timeout_action"`
 	DependsOn             []string `json:"depends_on"`
 }
 
@@ -75,8 +80,9 @@ type CreateTaskRequest struct {
 type PatchTaskRequest struct {
 	Status          *Status `json:"status"`
 	Result          *string `json:"result"`
-	FailureReason   *string `json:"failure_reason"`   // written on in_progress→failed
+	FailureReason   *string `json:"failure_reason"`    // written on in_progress→failed
 	RetryAssignedTo *string `json:"retry_assigned_to"` // set by CEO before failed→pending retry
+	CommitURL       *string `json:"commit_url"`        // V12: optional commit URL
 	Note            string  `json:"note"`
 	ChangedBy       string  `json:"changed_by"`
 	Version         int     `json:"version"`
