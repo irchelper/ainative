@@ -32,6 +32,7 @@ agent-queue moves task state out of agent memory and into SQLite. Any agent can 
 - **F10 — Chain dispatch**: `POST /dispatch/chain` creates a full serial chain with `depends_on` set automatically
 - **F13 — Review-reject two-stage chain (V10)**: When thinker/security/vision fails a task and routes to a different agent, autoRetry creates a `fix task → re-review task` two-stage chain; downstream deps block until re-review approves. Supports multi-level reject via `UpdateSupersededByChain`
 - **F14 — Extended retry_routing seed (V10.1)**: 16 seed rules covering vision/pm/ops default routing; vision added to `isReviewReject` reviewer list
+- **F19 — Single-task CEO notification (e2f142a)**: `POST /dispatch` and `POST /tasks` now support `notify_ceo_on_complete: true` for standalone tasks (no chain required); uses the same RetryQueue backoff (30s/60s/120s) as chain completion
 
 ## Quick Start
 
@@ -70,7 +71,7 @@ go build -o agent-queue .
 | `PATCH` | `/tasks/:id` | Update status/result with optimistic lock (`version` required) |
 | `POST` | `/tasks/:id/claim` | Atomic claim — body: `{"version": N, "agent": "name"}` |
 | `GET` | `/tasks/:id/deps-met` | Check if all dependencies are satisfied |
-| `POST` | `/dispatch` | Create task + trigger agent session atomically |
+| `POST` | `/dispatch` | Create task + trigger agent session atomically; supports `notify_ceo_on_complete` (bool) — notifies CEO session via SessionNotifier when task completes |
 | `POST` | `/dispatch/chain` | Create full serial chain with auto-set `depends_on` |
 | `GET` | `/tasks/poll` | Best available task for agent (`?assigned_to=X`); returns `null` if none |
 | `GET` | `/tasks/summary` | Global task counts + active task list |
