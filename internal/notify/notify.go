@@ -82,16 +82,29 @@ func (d *DiscordNotifier) resolveWebhookURL(agentID string) string {
 }
 
 // Notify sends a Discord webhook message.  It retries once on failure.
+// discordRetryBackoff defines wait durations between Discord webhook retries.
+// attempt 0 is immediate, 1→5s, 2→15s, 3→30s.
+var discordRetryBackoff = []time.Duration{0, 5 * time.Second, 15 * time.Second, 30 * time.Second}
+
+// Notify sends a Discord webhook message with up to 3 retries (exponential backoff).
 // A final failure is logged but never blocks the caller.
 func (d *DiscordNotifier) Notify(task model.Task) error {
-	err := d.send(task)
-	if err != nil {
-		log.Printf("[notify] first attempt failed for task %s: %v – retrying", task.ID, err)
-		err = d.send(task)
-		if err != nil {
-			log.Printf("[notify] retry failed for task %s: %v – giving up", task.ID, err)
+	var err error
+	for attempt, wait := range discordRetryBackoff {
+		if attempt > 0 {
+			log.Printf("[notify] attempt %d for task %s, waiting %v", attempt+1, task.ID, wait)
+			time.Sleep(wait)
 		}
+		err = d.send(task)
+		if err == nil {
+			if attempt > 0 {
+				log.Printf("[notify] task %s succeeded on attempt %d", task.ID, attempt+1)
+			}
+			return nil
+		}
+		log.Printf("[notify] attempt %d failed for task %s: %v", attempt+1, task.ID, err)
 	}
+	log.Printf("[notify] giving up on task %s after %d attempts: %v", task.ID, len(discordRetryBackoff), err)
 	return err
 }
 

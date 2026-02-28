@@ -92,16 +92,26 @@ func (s *SessionNotifier) mention() string {
 }
 
 // notifyCEO sends via webhook (primary) + sessions_send (secondary).
-// Either path may fail independently; both failures are logged.
+// Both paths walk the RetryQueue for resilience: transient failures are retried
+// with 30s/60s/120s backoff (up to 3 attempts each).
 func (s *SessionNotifier) notifyCEO(label, webhookContent, sessionMsg string) {
-	// Primary: Discord webhook – always visible in channel
-	if err := s.sendWebhook(webhookContent); err != nil {
-		log.Printf("[session_notifier] %s webhook failed: %v", label, err)
-	} else if s.ceoWebhookURL != "" {
-		log.Printf("[session_notifier] %s webhook: CEO notified via Discord", label)
-	}
+	// Primary: Discord webhook – always visible in channel.
+	// Enqueued in RetryQueue so transient failures are retried (方案C).
+	webhookLabel := label + ":webhook"
+	wc := webhookContent // capture for closure
+	s.retryQ.Enqueue(webhookLabel, func() error {
+		err := s.sendWebhook(wc)
+		if err != nil {
+			log.Printf("[session_notifier] %s webhook failed: %v", label, err)
+			return err
+		}
+		if s.ceoWebhookURL != "" {
+			log.Printf("[session_notifier] %s webhook: CEO notified via Discord", label)
+		}
+		return nil
+	})
 
-	// Secondary: sessions_send via RetryQueue (best-effort context injection)
+	// Secondary: sessions_send via RetryQueue (best-effort context injection).
 	sessionKey := s.ceoSessionKey
 	sendFn := func() error {
 		if err := s.client.SendToSession(sessionKey, sessionMsg); err != nil {

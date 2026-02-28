@@ -43,7 +43,12 @@ func NewOutboundWebhookNotifier(webhookURL, secret string) *OutboundWebhookNotif
 	}
 }
 
+// outboundRetryBackoff defines wait durations between outbound webhook retries.
+// attempt 0 is immediate, 1→2s, 2→5s.
+var outboundRetryBackoff = []time.Duration{0, 2 * time.Second, 5 * time.Second}
+
 // Notify implements notify.Notifier by posting a webhook for done/failed/cancelled tasks.
+// Runs in a background goroutine with up to 2 retries (best-effort).
 func (n *OutboundWebhookNotifier) Notify(task model.Task) error {
 	event := taskEvent(task.Status)
 	if event == "" {
@@ -59,22 +64,38 @@ func (n *OutboundWebhookNotifier) Notify(task model.Task) error {
 		ChainID:    task.ChainID,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 	}
-	go n.send(payload) // best-effort, non-blocking
+	go n.sendWithRetry(payload) // best-effort, non-blocking
 	return nil
 }
 
-// Send posts the event to the configured webhook URL.
-func (n *OutboundWebhookNotifier) send(payload OutboundWebhookEvent) {
+// sendWithRetry posts the event with up to len(outboundRetryBackoff)-1 retries.
+func (n *OutboundWebhookNotifier) sendWithRetry(payload OutboundWebhookEvent) {
+	for attempt, wait := range outboundRetryBackoff {
+		if attempt > 0 {
+			time.Sleep(wait)
+		}
+		if err := n.send(payload); err != nil {
+			log.Printf("[outbound-webhook] attempt %d failed for task %s: %v", attempt+1, payload.TaskID, err)
+			continue
+		}
+		if attempt > 0 {
+			log.Printf("[outbound-webhook] task %s succeeded on attempt %d", payload.TaskID, attempt+1)
+		}
+		return
+	}
+	log.Printf("[outbound-webhook] giving up on task %s after %d attempts", payload.TaskID, len(outboundRetryBackoff))
+}
+
+// send posts the event payload to the configured webhook URL once.
+func (n *OutboundWebhookNotifier) send(payload OutboundWebhookEvent) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[outbound-webhook] marshal: %v", err)
-		return
+		return fmt.Errorf("marshal: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, n.url, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("[outbound-webhook] build request: %v", err)
-		return
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "agent-queue/1.0")
@@ -86,14 +107,14 @@ func (n *OutboundWebhookNotifier) send(payload OutboundWebhookEvent) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		log.Printf("[outbound-webhook] POST %s: %v", n.url, err)
-		return
+		return fmt.Errorf("POST %s: %w", n.url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[outbound-webhook] non-2xx response %d from %s", resp.StatusCode, n.url)
+		return fmt.Errorf("non-2xx response %d from %s", resp.StatusCode, n.url)
 	}
+	return nil
 }
 
 // sign computes HMAC-SHA256(body, secret) and returns the hex digest.
