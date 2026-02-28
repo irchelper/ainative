@@ -38,7 +38,7 @@ func (h *Handler) handleCleanupTestTasks(w http.ResponseWriter, r *http.Request)
 		maxAge = d
 	}
 
-	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339Nano)
+	cutoff := time.Now().UTC().Add(-maxAge)
 
 	res, err := h.db.Exec(`
 		DELETE FROM tasks
