@@ -626,6 +626,12 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ACTION-1 Phase1: soft warning when description/spec_file or acceptance is missing.
+	var dispatchWarning string
+	if strings.TrimSpace(req.Description) == "" && strings.TrimSpace(req.SpecFile) == "" {
+		dispatchWarning = "description or spec_file is recommended for better agent context"
+	}
+
 	// Create task.
 	task, err := h.store.CreateTask(model.CreateTaskRequest{
 		Title:                  req.Title,
@@ -642,6 +648,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		AdvanceTaskTitle:       req.AdvanceTaskTitle,
 		AdvanceTaskDescription: req.AdvanceTaskDescription,
 		SpecFile:               req.SpecFile,
+		Acceptance:             req.Acceptance,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -669,6 +676,13 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if dispatchWarning != "" {
+		writeJSON(w, http.StatusCreated, struct {
+			model.DispatchResponse
+			Warning string `json:"warning,omitempty"`
+		}{resp, dispatchWarning})
+		return
+	}
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -739,6 +753,7 @@ func (h *Handler) handleDispatchChain(w http.ResponseWriter, r *http.Request) {
 			RequiresReview:      spec.RequiresReview,
 			Priority:            spec.Priority,
 			SpecFile:            spec.SpecFile,
+			Acceptance:          spec.Acceptance,
 			DependsOn:           dependsOn,
 			ChainID:             chainID,
 			NotifyCEOOnComplete: req.NotifyCEOOnComplete,

@@ -43,6 +43,7 @@ type Task struct {
 	AdvanceTaskTitle         string     `json:"advance_task_title,omitempty"`
 	AdvanceTaskDescription   string     `json:"advance_task_description,omitempty"`
 	SpecFile                 string     `json:"spec_file,omitempty"`
+	Acceptance               []string   `json:"acceptance,omitempty"`
 	StartedAt                *time.Time `json:"started_at,omitempty"`
 	CEONotifiedAt            *time.Time `json:"ceo_notified_at,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
@@ -83,6 +84,7 @@ type CreateTaskRequest struct {
 	AdvanceTaskTitle         string   `json:"advance_task_title"`
 	AdvanceTaskDescription   string   `json:"advance_task_description"`
 	SpecFile                 string   `json:"spec_file,omitempty"`
+	Acceptance               []string `json:"acceptance,omitempty"`
 	DependsOn                []string `json:"depends_on"`
 }
 
@@ -155,6 +157,7 @@ type DispatchRequest struct {
 	// SpecFile is an optional path to a local file containing the full task spec.
 	// When set, the file contents are read server-side and prepended to Description.
 	SpecFile                 string   `json:"spec_file,omitempty"`
+	Acceptance               []string `json:"acceptance,omitempty"`
 }
 
 // DispatchResponse wraps the created task and a flag indicating whether the
@@ -178,7 +181,8 @@ type ChainTaskSpec struct {
 	Priority       int    `json:"priority"`
 	// SpecFile is an optional path to a local file containing the full task spec.
 	// When set, the file contents are read server-side and prepended to Description.
-	SpecFile       string `json:"spec_file,omitempty"`
+	SpecFile       string   `json:"spec_file,omitempty"`
+	Acceptance     []string `json:"acceptance,omitempty"`
 }
 
 // ChainRequest is the body for POST /dispatch/chain.
@@ -252,11 +256,12 @@ type SummaryResponse struct {
 
 // TemplateTaskSpec is one task entry stored in a template.
 type TemplateTaskSpec struct {
-	AssignedTo     string `json:"assigned_to"`
-	Title          string `json:"title"`
-	Description    string `json:"description,omitempty"`
-	RequiresReview bool   `json:"requires_review,omitempty"`
-	Priority       int    `json:"priority,omitempty"`
+	AssignedTo     string   `json:"assigned_to"`
+	Title          string   `json:"title"`
+	Description    string   `json:"description,omitempty"`
+	RequiresReview bool     `json:"requires_review,omitempty"`
+	Priority       int      `json:"priority,omitempty"`
+	Acceptance     []string `json:"acceptance,omitempty"`
 }
 
 // Template defines a reusable chain/task pattern.
@@ -290,12 +295,13 @@ type DispatchFromTemplateRequest struct {
 // GraphNodeSpec describes a single node (task) in a DAG submission.
 type GraphNodeSpec struct {
 	// Key is a caller-chosen identifier used in edges; not stored.
-	Key         string `json:"key"`
-	Title       string `json:"title"`
-	AssignedTo  string `json:"assigned_to"`
-	Description string `json:"description"`
-	Priority    int    `json:"priority"`
-	RequiresReview bool `json:"requires_review"`
+	Key            string   `json:"key"`
+	Title          string   `json:"title"`
+	AssignedTo     string   `json:"assigned_to"`
+	Description    string   `json:"description"`
+	Priority       int      `json:"priority"`
+	RequiresReview bool     `json:"requires_review"`
+	Acceptance     []string `json:"acceptance,omitempty"`
 }
 
 // GraphEdge expresses a dependency: task at To depends on task at From.

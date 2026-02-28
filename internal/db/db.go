@@ -122,6 +122,8 @@ func Open(path string) (*sql.DB, error) {
 	// B8-B: ceo_notified_at — records when CEO was last notified about this failed task;
 	// used by the 4h cleanup sweeper to auto-cancel acknowledged failed tasks.
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN ceo_notified_at DATETIME`)
+	// ACTION-1 Phase1: acceptance — JSON-encoded list of acceptance criteria strings.
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN acceptance TEXT NOT NULL DEFAULT ''`)
 
 	// Deduplicate retry_routing: keep the earliest row per (assigned_to, error_keyword) pair,
 	// then add a UNIQUE index so INSERT OR IGNORE works correctly going forward.
