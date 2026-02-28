@@ -2471,3 +2471,182 @@ in_progress → cancelled  ✅（新增）
 | V23 | Webhook 外发（HMAC）、Timeline 增强 |
 | V24 | i18n 中英双语、任务评论 |
 | V25 | FSM cancel 补全、CHANGELOG、v1.0.0 Release |
+
+
+---
+
+## V29a UX 紧急修复 (commit: 0f88ad2)
+
+### 背景
+
+v1.0.0 发布后发现两个 UX 问题：待办面板始终空白、看板缺少 cancelled 列。V29a 紧急修复。
+
+### 修复 A：待办面板过滤逻辑修正
+
+**问题：** `humanTodos` 使用 `requires_review === true` 过滤，但大多数任务不设置此标志，导致待办面板永远为空。
+
+**修复（DashboardPage.vue + AppLayout.vue）：**
+
+```ts
+// 修复前
+const humanTodos = computed(() =>
+  (store.data?.todo ?? []).filter((t) => t.requires_review === true)
+)
+
+// 修复后：改为按状态过滤活跃任务
+const humanTodos = computed(() =>
+  (store.data?.todo ?? []).filter(
+    (t) => t.status === 'claimed' || t.status === 'in_progress'
+  )
+)
+```
+
+AppLayout.vue 的 `todoCount` badge 同步修正，与面板语义一致。
+
+### 修复 B：看板新增 cancelled 列
+
+```ts
+// KanbanPage.vue columns 数组新增
+{ key: 'cancelled', label: '已取消', color: 'text-gray-500' }
+```
+
+---
+
+## V29b TaskDetailPage SPA 修复 + 异常面板增强 (commit: 9879654)
+
+### 背景
+
+直接访问 `/tasks/:id` URL 时，Go 的 `/tasks/` handler 优先于 Vue Router，导致 SPA 返回 JSON 而非 HTML。同时异常面板分类逻辑和工作台文案需要改进。
+
+### 功能 A：TaskDetailPage SPA 路由修复
+
+**问题根因：** Vue Router 使用 history mode，`/tasks/:id` 直接访问时 Go handler 拦截返回 JSON。
+
+**修复（internal/handler/handler.go + internal/webui/embed.go）：**
+
+```go
+// handler.go: GET /tasks/:id 时检测 Accept header
+case http.MethodGet:
+    if strings.Contains(r.Header.Get("Accept"), "text/html") {
+        webui.ServeSPA(w, r)  // 浏览器请求 → 返回 SPA HTML
+        return
+    }
+    h.getTask(w, r, id)  // API 请求 → 返回 JSON
+```
+
+```go
+// webui/embed.go: 新增公开的 ServeSPA 函数
+func ServeSPA(w http.ResponseWriter, r *http.Request) {
+    serveIndex(w, r, StaticDir())
+}
+```
+
+### 功能 B：异常面板增强
+
+**异常分类（DashboardPage.vue）：**
+
+```ts
+function isRetryable(task: Task): boolean {
+  const r = task.failure_reason ?? task.result ?? ''
+  return r.startsWith('agent_timeout') || r.startsWith('stale max')
+}
+
+const retryableExceptions = computed(() => exceptions.value.filter(isRetryable))
+const needsHumanExceptions = computed(() => exceptions.value.filter(t => !isRetryable(t)))
+```
+
+- **可自动重试**（agent_timeout / stale max）：UI 提示"系统处理中"
+- **需人工介入**：展示 agent pill 过滤器，按 agent 分组查看
+
+**导航文案更新（i18n）：**
+- 中文：`仪表盘` → `工作台`
+- 英文：`Dashboard` → `Workbench`
+
+---
+
+## V30 DAG 重设计 + 跟踪页增强 + spec_file 支持 (commits: 2a48e96, 12489a0, 84d40c0, 3d56b5c)
+
+### 背景
+
+V30 分4个提交迭代完成前端 UX 全面升级，并新增后端 `spec_file` 字段解决长 description 传参问题。
+
+---
+
+### V30-v1：DAG 重设计 + 跟踪页 Tab 筛选 + 分页 (commit: 2a48e96)
+
+#### DAG 可视化重设计（GraphVisualizationPage.vue）
+
+引入 `dagre` + `d3-selection` + `d3-zoom` 替换原有手写 Kahn BFS 布局：
+
+| 对比项 | 旧实现 | 新实现 |
+|--------|--------|--------|
+| 布局算法 | 手写 Kahn BFS | dagre（自动计算节点坐标）|
+| 渲染方式 | HTML div | SVG + d3 |
+| 缩放/平移 | 无 | d3-zoom（滚轮缩放 + 拖拽平移）|
+| 节点间连线 | CSS border | SVG path（贝塞尔曲线）|
+
+新增依赖（web/package.json）：dagre@^0.8.5 / d3-selection@^3.0.0 / d3-zoom@^3.0.0
+
+新增文件：
+- `web/src/components/Pagination.vue`（通用分页组件）
+- `web/src/composables/usePagination.ts`
+
+#### 跟踪页 Tab 筛选 + 分页（GoalTrackingPage.vue）
+
+- Tab 筛选：全部 / 进行中 / 已完成 / 失败 四个 tab
+- 分页：每页默认10条，支持跳页
+
+---
+
+### V30-v2：仪表盘限流 + Badge 修复 + 进度条四色 + 看板 done 列折叠分页 (commit: 12489a0)
+
+#### DashboardPage 限流
+
+轮询间隔限制 >= 3s（POLL_MIN_INTERVAL = 3000），防止高频刷新。
+
+#### AgentStatsPage 进度条四色
+
+| 完成率 | 颜色 |
+|--------|------|
+| >= 90% | 青色（cyan）|
+| >= 80% | 绿色（green）|
+| >= 50% | 黄色（yellow）|
+| < 50% | 红色（red）|
+
+原为三色（80%/50%/红），新增 90% 档 cyan。
+
+#### KanbanPage done 列折叠分页
+
+done 列默认折叠（仅显示最近5条），展开按钮 + 分页（usePagination）。
+
+---
+
+### V30-v3：Tooltip + 描述行距 + 空态文案 + DB 路径截断 (commit: 84d40c0)
+
+UI 细节打磨：
+- **Tooltip**：长文本截断时显示 title 属性 tooltip（GoalTrackingPage / KanbanPage）
+- **描述行距**：TaskDetailPage leading-relaxed 增加行间距
+- **空态文案**：GoalTrackingPage 无任务时显示引导文案
+- **DB 路径截断**：SettingsPage 中 DB 路径过长时截断 + tooltip
+
+---
+
+### V30-v4：spec_file 字段支持 (commit: 3d56b5c)
+
+#### 背景
+
+`POST /dispatch` 通过 JSON body 传 description，长 spec 内容（如完整设计文档）容易超出 shell 转义限制，且不便版本管理。
+
+#### 新增字段
+
+```json
+{
+  "title": "实现登录功能",
+  "assigned_to": "coder",
+  "spec_file": "~/clawd/specs/login-spec.md"
+}
+```
+
+后端读取文件内容，prepend 到 description 前（支持 ~ 展开）；文件读取失败返回 400。
+
+DB schema：`ALTER TABLE tasks ADD COLUMN spec_file TEXT NOT NULL DEFAULT ''`
