@@ -20,6 +20,7 @@ import (
 	"github.com/irchelper/agent-queue/internal/notify"
 	"github.com/irchelper/agent-queue/internal/openclaw"
 	"github.com/irchelper/agent-queue/internal/store"
+	"github.com/irchelper/agent-queue/internal/webui"
 )
 
 // Handler holds shared dependencies for all HTTP handlers.
@@ -665,6 +666,13 @@ func (h *Handler) handleTasksID(w http.ResponseWriter, r *http.Request) {
 	case "":
 		switch r.Method {
 		case http.MethodGet:
+			// V29b TASK-A: If the client is a browser (Accept: text/html), serve SPA
+			// instead of JSON. This fixes direct URL access to /tasks/:id in Vue Router
+			// history mode where Go's /tasks/ handler takes priority over the SPA fallback.
+			if strings.Contains(r.Header.Get("Accept"), "text/html") {
+				webui.ServeSPA(w, r)
+				return
+			}
 			h.getTask(w, r, id)
 		case http.MethodPatch:
 			h.patchTask(w, r, id)

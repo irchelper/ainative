@@ -1,6 +1,6 @@
 export default {
   nav: {
-    dashboard: 'Dashboard',
+    dashboard: 'Workbench',
     goals: 'Goals',
     tracking: 'Tracking',
     kanban: 'Kanban',

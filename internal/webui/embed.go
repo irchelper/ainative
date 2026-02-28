@@ -59,6 +59,12 @@ func serveIndex(w http.ResponseWriter, r *http.Request, staticDir string) {
 	_, _ = w.Write(data)
 }
 
+// ServeSPA serves index.html for SPA routing fallback (e.g. from Go API handlers
+// that need to yield to Vue Router for browser direct-URL access).
+func ServeSPA(w http.ResponseWriter, r *http.Request) {
+	serveIndex(w, r, StaticDir())
+}
+
 // Stat checks if the embedded dist contains a real build (not just a placeholder).
 func Stat() (bool, error) {
 	entries, err := fs.ReadDir(webFS, "dist")

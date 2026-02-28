@@ -69,6 +69,42 @@ const exceptions = computed(() => store.data?.exceptions ?? [])
 const todoCount = computed(() => humanTodos.value.length)
 const exceptionCount = computed(() => exceptions.value.length)
 
+// V29b TASK-B: classify exceptions into retryable vs needsHuman
+function isRetryable(task: Task): boolean {
+  const r = task.failure_reason ?? task.result ?? ''
+  return r.startsWith('agent_timeout') || r.startsWith('stale max')
+}
+
+const retryableExceptions = computed(() => exceptions.value.filter(isRetryable))
+const needsHumanExceptions = computed(() => exceptions.value.filter(t => !isRetryable(t)))
+
+// V29b TASK-B: agent pill filter + counts
+const agentFilter = ref<string | null>(null)
+
+const agentCounts = computed(() => {
+  const m: Record<string, number> = {}
+  for (const t of exceptions.value) {
+    if (t.status === 'failed') {
+      m[t.assigned_to] = (m[t.assigned_to] ?? 0) + 1
+    }
+  }
+  return Object.entries(m).sort((a, b) => b[1] - a[1])
+})
+
+function filteredExceptions(list: Task[]): Task[] {
+  if (!agentFilter.value) return list
+  return list.filter(t => t.assigned_to === agentFilter.value)
+}
+
+// V29b TASK-C: expand/collapse failure_reason per task
+const expandedReasons = ref<Set<string>>(new Set())
+function toggleReason(id: string) {
+  const s = new Set(expandedReasons.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  expandedReasons.value = s
+}
+
 const actingIds = ref<Set<string>>(new Set())
 
 // V26-A: keyboard navigation on exception list
@@ -160,6 +196,12 @@ function statusBadgeClass(status: string): string {
   return map[status] ?? 'bg-gray-700 text-gray-400'
 }
 
+// V29b TASK-C: retry with confirm
+async function retryWithConfirm(task: Task) {
+  if (!window.confirm(`确认重试任务：${task.title}?`)) return
+  await patchTask(task.id, { status: 'pending', version: task.version })
+}
+
 // V22: Bulk operations
 const selectedIds = ref<Set<string>>(new Set())
 const bulkLoading = ref(false)
@@ -177,6 +219,39 @@ function clearSelection() {
   selectedIds.value = new Set()
   reassignTarget.value = ''
   bulkError.value = null
+}
+
+// V29b TASK-C: select all visible exceptions
+function selectAll() {
+  const all = exceptions.value
+  if (selectedIds.value.size === all.length) {
+    selectedIds.value = new Set()
+  } else {
+    selectedIds.value = new Set(all.map(t => t.id))
+  }
+}
+
+// V29b TASK-C: bulk retry (PATCH each selected to pending)
+async function bulkRetry() {
+  if (!selectedIds.value.size) return
+  if (!window.confirm(`确认批量重试 ${selectedIds.value.size} 个任务？`)) return
+  bulkLoading.value = true
+  bulkError.value = null
+  const ids = Array.from(selectedIds.value)
+  const failedIds: string[] = []
+  for (const id of ids) {
+    const task = exceptions.value.find(t => t.id === id)
+    if (!task) continue
+    try {
+      await api.patchTask(id, { status: 'pending', version: task.version })
+    } catch {
+      failedIds.push(id)
+    }
+  }
+  if (failedIds.length > 0) bulkError.value = `${failedIds.length} 个任务重试失败`
+  clearSelection()
+  await store.fetch()
+  bulkLoading.value = false
 }
 
 async function bulkAction(action: 'cancel' | 'reassign') {
@@ -401,34 +476,67 @@ async function bulkAction(action: 'cancel' | 'reassign') {
           </div>
         </div>
 
-        <!-- V22: Bulk toolbar -->
+        <!-- V29b TASK-B: Agent pill filter bar -->
+        <div v-if="agentCounts.length > 0" class="px-4 pt-3 pb-0 flex items-center gap-2 flex-wrap border-b border-gray-800/50 pb-3">
+          <button
+            class="text-xs px-2.5 py-1 rounded-full border transition-colors"
+            :class="agentFilter === null ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'"
+            @click="agentFilter = null"
+          >全部 ({{ exceptionCount }})</button>
+          <button
+            v-for="[agent, count] in agentCounts"
+            :key="agent"
+            class="text-xs px-2.5 py-1 rounded-full border transition-colors"
+            :class="agentFilter === agent ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'"
+            @click="agentFilter = agentFilter === agent ? null : agent"
+          >{{ agent }} ({{ count }})</button>
+        </div>
+
+        <!-- V22/V29b: Bulk toolbar -->
         <div
-          v-if="selectedIds.size > 0"
-          class="px-4 py-2.5 bg-blue-950/40 border-b border-blue-500/20 flex items-center gap-2 flex-wrap"
+          class="px-4 py-2.5 border-b border-gray-800 flex items-center gap-2 flex-wrap"
+          :class="selectedIds.size > 0 ? 'bg-blue-950/40 border-blue-500/20' : ''"
         >
-          <span class="text-xs text-blue-400 font-medium">{{ t('dashboard.selected', { n: selectedIds.size }) }}</span>
-          <button
-            class="text-xs px-3 py-1.5 bg-red-800/60 hover:bg-red-700/60 text-red-300 rounded-lg transition-colors disabled:opacity-50"
-            :disabled="bulkLoading"
-            @click="bulkAction('cancel')"
-          >✖ {{ t('dashboard.bulkCancel') }}</button>
-          <div class="flex items-center gap-1.5">
-            <input
-              v-model="reassignTarget"
-              type="text"
-              :placeholder="t('dashboard.agentName') + '…'"
-              class="text-xs bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-gray-200 w-24 focus:outline-none focus:border-blue-500"
-            />
+          <!-- V29b TASK-C: select-all checkbox -->
+          <input
+            type="checkbox"
+            class="h-4 w-4 rounded border-gray-600 bg-gray-800 accent-blue-500 cursor-pointer"
+            :checked="selectedIds.size > 0 && selectedIds.size === exceptions.length"
+            :indeterminate="selectedIds.size > 0 && selectedIds.size < exceptions.length"
+            @change="selectAll()"
+          />
+          <span v-if="selectedIds.size > 0" class="text-xs text-blue-400 font-medium">{{ t('dashboard.selected', { n: selectedIds.size }) }}</span>
+          <span v-else class="text-xs text-gray-600">全选</span>
+          <template v-if="selectedIds.size > 0">
+            <!-- V29b TASK-C: bulk retry -->
             <button
-              class="text-xs px-3 py-1.5 bg-blue-800/60 hover:bg-blue-700/60 text-blue-300 rounded-lg transition-colors disabled:opacity-50"
-              :disabled="bulkLoading || !reassignTarget.trim()"
-              @click="bulkAction('reassign')"
-            >↩ {{ t('dashboard.bulkReassign') }}</button>
-          </div>
-          <button
-            class="text-xs text-gray-500 hover:text-gray-300 ml-auto"
-            @click="clearSelection"
-          >✕ {{ t('dashboard.clearSelection') }}</button>
+              class="text-xs px-3 py-1.5 bg-green-800/60 hover:bg-green-700/60 text-green-300 rounded-lg transition-colors disabled:opacity-50"
+              :disabled="bulkLoading"
+              @click="bulkRetry()"
+            >🔄 批量重试</button>
+            <button
+              class="text-xs px-3 py-1.5 bg-red-800/60 hover:bg-red-700/60 text-red-300 rounded-lg transition-colors disabled:opacity-50"
+              :disabled="bulkLoading"
+              @click="bulkAction('cancel')"
+            >✖ {{ t('dashboard.bulkCancel') }}</button>
+            <div class="flex items-center gap-1.5">
+              <input
+                v-model="reassignTarget"
+                type="text"
+                :placeholder="t('dashboard.agentName') + '…'"
+                class="text-xs bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-gray-200 w-24 focus:outline-none focus:border-blue-500"
+              />
+              <button
+                class="text-xs px-3 py-1.5 bg-blue-800/60 hover:bg-blue-700/60 text-blue-300 rounded-lg transition-colors disabled:opacity-50"
+                :disabled="bulkLoading || !reassignTarget.trim()"
+                @click="bulkAction('reassign')"
+              >↩ {{ t('dashboard.bulkReassign') }}</button>
+            </div>
+            <button
+              class="text-xs text-gray-500 hover:text-gray-300 ml-auto"
+              @click="clearSelection"
+            >✕ {{ t('dashboard.clearSelection') }}</button>
+          </template>
           <div v-if="bulkError" class="w-full text-xs text-red-400">{{ bulkError }}</div>
         </div>
 
@@ -438,58 +546,97 @@ async function bulkAction(action: 'cancel' | 'reassign') {
             <div class="text-sm">{{ t('dashboard.noExceptions') }}</div>
           </div>
 
-          <div
-            v-for="(task, idx) in exceptions"
-            :key="task.id"
-            :data-keyboard-index="idx"
-            class="bg-gray-900 border rounded-xl p-4 transition-colors cursor-pointer"
-            :class="[
-              selectedIds.has(task.id)
-                ? 'border-blue-500/50 bg-blue-500/5'
-                : 'border-gray-700/60 hover:border-red-500/30',
-              kbIndex === idx ? 'ring-2 ring-blue-500' : '',
-            ]"
-            @click="$router.push(`/tasks/${task.id}`)"
-          >
-            <div class="flex items-start gap-3 mb-2">
-              <!-- Checkbox -->
-              <input
-                type="checkbox"
-                class="mt-0.5 h-4 w-4 rounded border-gray-600 bg-gray-800 accent-blue-500 cursor-pointer shrink-0"
-                :checked="selectedIds.has(task.id)"
-                @click.stop="toggleSelect(task.id)"
-              />
-              <div class="flex-1 min-w-0">
-                <h3 class="font-medium text-gray-100 text-sm mb-1.5 truncate">{{ task.title }}</h3>
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span
-                    class="text-xs font-medium px-2 py-0.5 rounded-full border"
-                    :class="statusBadgeClass(task.status)"
-                  >{{ task.status }}</span>
-                  <span class="text-xs text-gray-500">{{ task.assigned_to }}</span>
-                </div>
-              </div>
-              <span class="text-gray-600 text-sm shrink-0">›</span>
+          <!-- V29b TASK-B: 🔧 可重试 section -->
+          <template v-if="filteredExceptions(retryableExceptions).length > 0">
+            <div class="text-xs text-gray-500 font-semibold px-1 mt-2 mb-1">
+              🔧 可重试 ({{ filteredExceptions(retryableExceptions).length }})
             </div>
             <div
-              v-if="task.failure_reason || task.result"
-              class="text-xs text-gray-400 bg-gray-800/60 rounded-lg p-2.5 line-clamp-2 border border-gray-700/40"
+              v-for="(task, idx) in filteredExceptions(retryableExceptions)"
+              :key="task.id"
+              :data-keyboard-index="idx"
+              class="bg-gray-800/50 border rounded-xl p-4 transition-colors cursor-pointer"
+              :class="[
+                selectedIds.has(task.id) ? 'border-blue-500/50 bg-blue-500/5' : 'border-gray-700/40 hover:border-gray-600',
+                kbIndex === idx ? 'ring-2 ring-blue-500' : '',
+              ]"
+              @click="$router.push(`/tasks/${task.id}`)"
             >
-              {{ task.failure_reason || task.result }}
+              <div class="flex items-start gap-3 mb-2">
+                <input type="checkbox" class="mt-0.5 h-4 w-4 rounded border-gray-600 bg-gray-800 accent-blue-500 cursor-pointer shrink-0"
+                  :checked="selectedIds.has(task.id)" @click.stop="toggleSelect(task.id)" />
+                <div class="flex-1 min-w-0">
+                  <h3 class="font-medium text-gray-200 text-sm mb-1.5 truncate">{{ task.title }}</h3>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs font-medium px-2 py-0.5 rounded-full border" :class="statusBadgeClass(task.status)">{{ task.status }}</span>
+                    <span class="text-xs text-gray-500">{{ task.assigned_to }}</span>
+                  </div>
+                </div>
+                <span class="text-gray-600 text-sm shrink-0">›</span>
+              </div>
+              <div v-if="task.failure_reason || task.result" class="mb-2">
+                <div class="text-xs text-gray-500 bg-gray-800/60 rounded-lg p-2.5 border border-gray-700/40"
+                  :class="expandedReasons.has(task.id) ? '' : 'line-clamp-2'">
+                  {{ task.failure_reason || task.result }}
+                </div>
+                <button class="text-xs text-gray-600 hover:text-gray-400 mt-1" @click.stop="toggleReason(task.id)">
+                  {{ expandedReasons.has(task.id) ? '收起' : '展开' }}
+                </button>
+              </div>
+              <div class="flex gap-2">
+                <button class="flex-1 text-xs py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-50"
+                  :disabled="actingIds.has(task.id)" @click.stop="retryWithConfirm(task)">🔄 重试</button>
+                <button class="flex-1 text-xs py-1.5 rounded-lg bg-gray-700 hover:bg-red-900 text-gray-300 hover:text-red-300 transition-colors disabled:opacity-50"
+                  :disabled="actingIds.has(task.id)" @click.stop="patchTask(task.id, { status: 'cancelled', version: task.version })">✖ 取消</button>
+              </div>
             </div>
-            <div class="flex gap-2 mt-3">
-              <button
-                class="flex-1 text-xs py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-50"
-                :disabled="actingIds.has(task.id)"
-                @click.stop="patchTask(task.id, { status: 'pending', version: task.version })"
-              >🔄 重试</button>
-              <button
-                class="flex-1 text-xs py-1.5 rounded-lg bg-gray-700 hover:bg-red-900 text-gray-300 hover:text-red-300 transition-colors disabled:opacity-50"
-                :disabled="actingIds.has(task.id)"
-                @click.stop="patchTask(task.id, { status: 'cancelled', version: task.version })"
-              >✖ 取消</button>
+          </template>
+
+          <!-- V29b TASK-B: 👤 需人工 section -->
+          <template v-if="filteredExceptions(needsHumanExceptions).length > 0">
+            <div class="text-xs text-gray-500 font-semibold px-1 mt-3 mb-1">
+              👤 需人工 ({{ filteredExceptions(needsHumanExceptions).length }})
             </div>
-          </div>
+            <div
+              v-for="(task, idx) in filteredExceptions(needsHumanExceptions)"
+              :key="task.id"
+              :data-keyboard-index="retryableExceptions.length + idx"
+              class="bg-gray-900 border rounded-xl p-4 transition-colors cursor-pointer"
+              :class="[
+                selectedIds.has(task.id) ? 'border-blue-500/50 bg-blue-500/5' : 'border-gray-700/60 hover:border-red-500/30',
+                kbIndex === retryableExceptions.length + idx ? 'ring-2 ring-blue-500' : '',
+              ]"
+              @click="$router.push(`/tasks/${task.id}`)"
+            >
+              <div class="flex items-start gap-3 mb-2">
+                <input type="checkbox" class="mt-0.5 h-4 w-4 rounded border-gray-600 bg-gray-800 accent-blue-500 cursor-pointer shrink-0"
+                  :checked="selectedIds.has(task.id)" @click.stop="toggleSelect(task.id)" />
+                <div class="flex-1 min-w-0">
+                  <h3 class="font-medium text-gray-100 text-sm mb-1.5 truncate">{{ task.title }}</h3>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs font-medium px-2 py-0.5 rounded-full border" :class="statusBadgeClass(task.status)">{{ task.status }}</span>
+                    <span class="text-xs text-gray-500">{{ task.assigned_to }}</span>
+                  </div>
+                </div>
+                <span class="text-gray-600 text-sm shrink-0">›</span>
+              </div>
+              <div v-if="task.failure_reason || task.result" class="mb-2">
+                <div class="text-xs text-gray-400 bg-gray-800/60 rounded-lg p-2.5 border border-gray-700/40"
+                  :class="expandedReasons.has(task.id) ? '' : 'line-clamp-2'">
+                  {{ task.failure_reason || task.result }}
+                </div>
+                <button class="text-xs text-gray-600 hover:text-gray-400 mt-1" @click.stop="toggleReason(task.id)">
+                  {{ expandedReasons.has(task.id) ? '收起' : '展开' }}
+                </button>
+              </div>
+              <div class="flex gap-2">
+                <button class="flex-1 text-xs py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-50"
+                  :disabled="actingIds.has(task.id)" @click.stop="retryWithConfirm(task)">🔄 重试</button>
+                <button class="flex-1 text-xs py-1.5 rounded-lg bg-gray-700 hover:bg-red-900 text-gray-300 hover:text-red-300 transition-colors disabled:opacity-50"
+                  :disabled="actingIds.has(task.id)" @click.stop="patchTask(task.id, { status: 'cancelled', version: task.version })">✖ 取消</button>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
     </div>

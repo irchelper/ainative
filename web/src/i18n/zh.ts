@@ -1,6 +1,6 @@
 export default {
   nav: {
-    dashboard: '仪表盘',
+    dashboard: '工作台',
     goals: '目标',
     tracking: '跟踪',
     kanban: '看板',
