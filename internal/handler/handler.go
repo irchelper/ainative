@@ -291,6 +291,13 @@ func (h *Handler) checkAgentTimeouts() {
 		if now.Sub(*task.StartedAt) <= threshold {
 			continue
 		}
+		// B5: if task already has a result, the agent completed work but hasn't
+		// PATCH'd done yet (e.g. lag between writing result and status update).
+		// Skip timeout-kill to avoid false positives; let stale ticker handle it.
+		if task.Result != "" {
+			log.Printf("[agent_timeout] task %s (%s) has result, skipping timeout-fail", task.ID, task.Title)
+			continue
+		}
 		// Timed out → PATCH failed
 		failedStatus := model.StatusFailed
 		reason := fmt.Sprintf("agent_timeout: exceeded %dmin SLA", timeoutMinutes)
