@@ -129,6 +129,7 @@ func (h *Handler) runStaleTicker() {
 			h.checkStaleTasks()
 			h.checkHumanTimeouts()
 			h.checkAgentTimeouts()
+			h.sweepNotifiedFailed()
 		}
 	}
 }
@@ -158,7 +159,7 @@ func (h *Handler) checkStaleTasks() {
 						continue
 					}
 					alertTask.FailureReason = fmt.Sprintf("stale max dispatches reached (%d/%d)", c.StaleDispatchCount, h.maxStaleDispatches)
-					go h.sessionN.OnFailed(alertTask) // 方案C: async, don't block ticker
+					go h.notifyFailedCEO(alertTask) // 方案C: async, don't block ticker
 				}
 				// Touch to reset countdown and avoid repeated alerts every tick.
 				if err := h.store.TouchUpdatedAt(c.ID); err != nil {
@@ -193,7 +194,7 @@ func (h *Handler) checkStaleTasks() {
 					continue
 				}
 				alertTask.FailureReason = fmt.Sprintf("stale max dispatches reached (%d/%d)", c.StaleDispatchCount, h.maxStaleDispatches)
-				go h.sessionN.OnFailed(alertTask) // 方案C: async, don't block ticker
+				go h.notifyFailedCEO(alertTask) // 方案C: async, don't block ticker
 			}
 			// Touch to reset countdown and avoid repeated alerts every tick.
 			if err := h.store.TouchUpdatedAt(c.ID); err != nil {
@@ -334,13 +335,38 @@ func (h *Handler) checkAgentTimeouts() {
 		if h.sessionN != nil {
 			trace := h.buildAlertTrace(failedTask, &timeoutMinutes, "agent_timeout bypass")
 			failedTask.FailureReason = reason + "\n" + trace
-			go h.sessionN.OnFailed(failedTask)
+			go h.notifyFailedCEO(failedTask)
 		}
 	}
 }
 
 // CheckAgentTimeouts is exported for testing.
 func (h *Handler) CheckAgentTimeouts() { h.checkAgentTimeouts() }
+
+// sweepNotifiedFailed auto-cancels failed tasks that have been CEO-notified for >4h.
+// These tasks are considered "acknowledged" — CEO has seen them and can follow up
+// via new tasks. Cleaning them up reduces dashboard noise.
+func (h *Handler) sweepNotifiedFailed() {
+	const threshold = 4 * time.Hour
+	tasks, err := h.store.ListNotifiedFailedOlderThan(threshold)
+	if err != nil {
+		log.Printf("[sweep_failed] ListNotifiedFailedOlderThan: %v", err)
+		return
+	}
+	for _, task := range tasks {
+		cancelStatus := model.StatusCancelled
+		if _, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
+			Status:    &cancelStatus,
+			ChangedBy: "system",
+			Version:   task.Version,
+			Note:      "auto-cancelled: failed + CEO notified >4h ago",
+		}); err != nil {
+			log.Printf("[sweep_failed] auto-cancel %s failed: %v", task.ID, err)
+		} else {
+			log.Printf("[sweep_failed] auto-cancelled task %s (%s) – notified >4h ago", task.ID, task.Title)
+		}
+	}
+}
 
 // advanceHumanTask drives a pending human task through FSM states to reach targetStatus.
 // For done/blocked, the FSM path is: pending → claimed → in_progress → target.
@@ -368,6 +394,22 @@ func (h *Handler) advanceHumanTask(task model.Task, targetStatus model.Status, r
 
 // buildAlertTrace assembles a compact, self-contained trace block for CEO alerts.
 // timeoutMinutes: pass nil when not applicable.
+// notifyFailedCEO calls sessionN.OnFailed and stamps ceo_notified_at (best-effort).
+// Use this instead of bare sessionN.OnFailed so every CEO alert is tracked in DB.
+func (h *Handler) notifyFailedCEO(task model.Task) error {
+	if h.sessionN == nil {
+		return nil
+	}
+	if err := h.sessionN.OnFailed(task); err != nil {
+		return err
+	}
+	// Stamp ceo_notified_at best-effort (don't fail the notify path).
+	if err := h.store.SetCEONotifiedAt(task.ID); err != nil {
+		log.Printf("[handler] SetCEONotifiedAt %s: %v", task.ID, err)
+	}
+	return nil
+}
+
 func (h *Handler) buildAlertTrace(task model.Task, timeoutMinutes *int, routeReason string) string {
 	startedAt := "(nil)"
 	if task.StartedAt != nil {
@@ -1036,7 +1078,7 @@ func (h *Handler) handleFailedTask(task model.Task) {
 			} else if h.sessionN != nil {
 				alert := cancelled
 				alert.FailureReason = "系统告警占位任务（prod fail notify），无可执行 spec，已自动 cancelled。如需处理请人工重新派单并补充 spec。"
-				if err := h.sessionN.OnFailed(alert); err != nil {
+				if err := h.notifyFailedCEO(alert); err != nil {
 					log.Printf("[handler] notify-placeholder notify CEO for %s failed: %v", task.ID, err)
 				}
 			}
@@ -1059,7 +1101,7 @@ func (h *Handler) handleFailedTask(task model.Task) {
 			} else if h.sessionN != nil {
 				alert := cancelled
 				alert.FailureReason = "任务 retry 已达3级上限，已自动cancelled（需关注）"
-				if err := h.sessionN.OnFailed(alert); err != nil {
+				if err := h.notifyFailedCEO(alert); err != nil {
 					log.Printf("[handler] retry depth cap notify CEO for %s failed: %v", task.ID, err)
 				}
 			}
@@ -1094,7 +1136,7 @@ func (h *Handler) handleFailedTask(task model.Task) {
 				// set base reason for routing match lookup
 				task.FailureReason = reason
 				task.FailureReason = reason + "\n" + h.buildAlertTrace(task, nil, "retry_routing none")
-				if err := h.sessionN.OnFailed(task); err != nil {
+				if err := h.notifyFailedCEO(task); err != nil {
 					log.Printf("[handler] CEO notification failed for task %s: %v", task.ID, err)
 				}
 			}

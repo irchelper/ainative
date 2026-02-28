@@ -997,6 +997,36 @@ func (s *Store) GetRetryRouteMatch(assignedTo, result string) (*model.RetryRoute
 	return &r, nil
 }
 
+// SetCEONotifiedAt stamps ceo_notified_at = now for a task (best-effort).
+func (s *Store) SetCEONotifiedAt(id string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET ceo_notified_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
+}
+
+// ListNotifiedFailedOlderThan returns failed tasks whose ceo_notified_at
+// is older than the given duration (for the 4h cleanup sweeper).
+func (s *Store) ListNotifiedFailedOlderThan(threshold time.Duration) ([]model.Task, error) {
+	cutoff := time.Now().UTC().Add(-threshold)
+	rows, err := s.db.Query(`
+		SELECT id, title, assigned_to, version FROM tasks
+		WHERE status = 'failed'
+		  AND ceo_notified_at IS NOT NULL
+		  AND ceo_notified_at < ?`, cutoff.Format("2006-01-02T15:04:05.999999Z"))
+	if err != nil {
+		return nil, fmt.Errorf("ListNotifiedFailedOlderThan: %w", err)
+	}
+	defer rows.Close()
+	var tasks []model.Task
+	for rows.Next() {
+		var t model.Task
+		if err := rows.Scan(&t.ID, &t.Title, &t.AssignedTo, &t.Version); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 func (s *Store) historyFor(id string) ([]model.HistoryItem, error) {
 	rows, err := s.db.Query(`
 		SELECT id, task_id, from_status, to_status, changed_by, note, changed_at

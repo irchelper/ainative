@@ -44,6 +44,7 @@ type Task struct {
 	AdvanceTaskDescription   string     `json:"advance_task_description,omitempty"`
 	SpecFile                 string     `json:"spec_file,omitempty"`
 	StartedAt                *time.Time `json:"started_at,omitempty"`
+	CEONotifiedAt            *time.Time `json:"ceo_notified_at,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 

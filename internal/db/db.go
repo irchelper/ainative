@@ -119,6 +119,9 @@ func Open(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN advance_task_description TEXT NOT NULL DEFAULT ''`)
 	// V30-v4: spec_file — stores path to a local spec file for long task descriptions
 	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN spec_file TEXT NOT NULL DEFAULT ''`)
+	// B8-B: ceo_notified_at — records when CEO was last notified about this failed task;
+	// used by the 4h cleanup sweeper to auto-cancel acknowledged failed tasks.
+	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN ceo_notified_at DATETIME`)
 
 	// Deduplicate retry_routing: keep the earliest row per (assigned_to, error_keyword) pair,
 	// then add a UNIQUE index so INSERT OR IGNORE works correctly going forward.
