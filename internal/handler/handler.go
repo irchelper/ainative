@@ -808,6 +808,30 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// V31-BrowserRelay: if this failed status is due to Browser Relay not attached,
+	// convert to blocked early to avoid failed/autoRetry/stale paths.
+	if req.Status != nil && *req.Status == model.StatusFailed {
+		payload := ""
+		if req.FailureReason != nil {
+			payload += *req.FailureReason + "\n"
+		}
+		if req.Result != nil {
+			payload += *req.Result
+		}
+		if isBrowserRelayNotAttachedText(payload) {
+			blocked := model.StatusBlocked
+			reason := "matched_rule=browser_relay_not_attached; route_reason=needs_user_attach"
+			if req.Result != nil && strings.TrimSpace(*req.Result) != "" {
+				combined := *req.Result + "\n" + reason
+				req.Result = &combined
+			} else {
+				req.Result = &reason
+			}
+			req.Status = &blocked
+			req.Note = "browser relay not attached"
+		}
+	}
+
 	task, triggered, err := h.store.PatchTask(id, req)
 	if err != nil {
 		var ve *store.ValidationError
@@ -1299,6 +1323,32 @@ func isTestTaskTitleAssignee(title, assignedTo string) bool {
 
 func isTestTask(t model.Task) bool {
 	return isTestTaskTitleAssignee(t.Title, t.AssignedTo)
+}
+
+// isBrowserRelayNotAttachedText detects Browser Relay not-attached errors (case-insensitive).
+// Rules: "browser relay" + (attach/not attached/no connected tab/badge/relay toolbar),
+// OR "openclaw" + "browser relay", OR "badge on" + "browser relay".
+func isBrowserRelayNotAttachedText(text string) bool {
+	lt := strings.ToLower(text)
+	hasRelay := strings.Contains(lt, "browser relay")
+	if hasRelay {
+		if strings.Contains(lt, "attach") || strings.Contains(lt, "not attached") ||
+			strings.Contains(lt, "no connected tab") || strings.Contains(lt, "badge") ||
+			strings.Contains(lt, "relay toolbar") {
+			return true
+		}
+		if strings.Contains(lt, "badge on") {
+			return true
+		}
+	}
+	if strings.Contains(lt, "openclaw") && hasRelay {
+		return true
+	}
+	// extra stable patterns
+	if strings.Contains(lt, "no connected tab") {
+		return true
+	}
+	return false
 }
 
 func handleStoreError(w http.ResponseWriter, err error) {
