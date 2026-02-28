@@ -2,9 +2,7 @@
 // OpenClaw sessions_send.
 package notify
 
-import (
-	"strings"
-	"bytes"
+import (	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -120,12 +118,6 @@ func (s *SessionNotifier) notifyCEO(label, webhookContent, sessionMsg string) {
 // Message format matches docs/ARCH.md §5 spec.
 // Uses RetryQueue: up to 3 retries with 30s/60s/120s backoff.
 func (s *SessionNotifier) OnFailed(task model.Task) error {
-	// TEMP (2026-02-28): silence [TEST] failures so they don't spam CEO channels.
-	// Remove after TASK-TEST-SILENCE is deployed everywhere.
-	if strings.Contains(task.Title, "[TEST]") {
-		log.Printf("[session_notifier] OnFailed:%s [TEST] silenced", task.ID)
-		return nil
-	}
 	reason := task.FailureReason
 	if reason == "" {
 		reason = task.Result
