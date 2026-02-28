@@ -1457,7 +1457,16 @@ func isTestTaskTitleAssignee(title, assignedTo string) bool {
 }
 
 func isTestTask(t model.Task) bool {
-	return isTestTaskTitleAssignee(t.Title, t.AssignedTo)
+	if isTestTaskTitleAssignee(t.Title, t.AssignedTo) {
+		return true
+	}
+	// B3: catch retry/fix/re-review chains from test-sourced failures.
+	// failure_reason == "test" means the original was a test sentinel;
+	// retry descendants should also be silenced (no CEO notify, auto-cancel).
+	if strings.EqualFold(strings.TrimSpace(t.FailureReason), "test") {
+		return true
+	}
+	return false
 }
 
 // isNotifyPlaceholderTask returns true for "prod fail notify[-suffix]" tasks.
