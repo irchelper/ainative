@@ -137,7 +137,9 @@ function formatDuration(minutes: number): string {
             </div>
             <div class="bg-gray-800/60 rounded-lg py-2">
               <div class="text-sm font-bold text-gray-300">
-                {{ s.avg_duration_minutes > 0 ? formatDuration(s.avg_duration_minutes) : '—' }}
+                <span :title="s.avg_duration_minutes > 0 ? '' : '暂无历史数据'">
+                  {{ s.avg_duration_minutes > 0 ? formatDuration(s.avg_duration_minutes) : '暂无数据' }}
+                </span>
               </div>
               <div class="text-[10px] text-gray-500 mt-0.5">{{ t('stats.avgDuration') }}</div>
             </div>

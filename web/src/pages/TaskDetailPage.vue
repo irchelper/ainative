@@ -336,7 +336,7 @@ async function submitComment() {
             <!-- Description -->
             <div v-if="task.description" class="mb-4">
               <div class="text-xs text-gray-500 mb-1.5">描述</div>
-              <div class="bg-gray-800 rounded-lg p-3 text-sm text-gray-300 whitespace-pre-wrap leading-relaxed border border-gray-700/50">{{ task.description }}</div>
+              <div class="bg-gray-800 rounded-lg p-3 text-sm text-gray-300 whitespace-pre-wrap leading-normal border border-gray-700/50">{{ task.description }}</div>
             </div>
 
             <!-- Result -->

@@ -253,7 +253,7 @@ function segmentClass(seg: { status: string; done: boolean; active: boolean }): 
               >
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
-                    <h3 class="font-medium text-gray-400 text-sm truncate">{{ chainTitle(chain) }}</h3>
+                    <h3 class="font-medium text-gray-400 text-sm truncate" :title="chainTitle(chain)">{{ chainTitle(chain) }}</h3>
                     <span class="text-xs text-gray-600 shrink-0">{{ chain.tasks.length }} 任务</span>
                     <span class="text-xs text-green-500/80 shrink-0">100%</span>
                   </div>
@@ -300,7 +300,7 @@ function segmentClass(seg: { status: string; done: boolean; active: boolean }): 
               >
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2 mb-1">
-                    <h3 class="font-medium text-gray-100 text-sm truncate">{{ chainTitle(chain) }}</h3>
+                    <h3 class="font-medium text-gray-100 text-sm truncate" :title="chainTitle(chain)">{{ chainTitle(chain) }}</h3>
                     <span class="text-xs text-red-400 shrink-0">
                       {{ chain.tasks.filter(t => t.status === 'failed').length }} 失败
                     </span>

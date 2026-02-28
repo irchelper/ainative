@@ -86,7 +86,7 @@ function maskUrl(url: string): string {
             </div>
             <div>
               <div class="text-gray-500 text-xs">DB 路径</div>
-              <div class="text-gray-200 mt-1 font-mono text-xs break-all">{{ config.db_path ?? '-' }}</div>
+              <div class="text-gray-200 mt-1 font-mono text-xs truncate" :title="config.db_path ?? ''">{{ config.db_path ?? '-' }}</div>
             </div>
             <div>
               <div class="text-gray-500 text-xs">进程 PID</div>

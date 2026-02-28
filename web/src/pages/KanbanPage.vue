@@ -166,7 +166,7 @@ function cardClass(task: Task): string {
                   :class="[cardClass(task), kbIndex === taskIndexMap[task.id] ? 'ring-2 ring-blue-500' : '']"
                   @click="$router.push(`/tasks/${task.id}`)"
                 >
-                  <div class="text-xs font-medium text-gray-200 leading-snug mb-2 line-clamp-2">{{ task.title }}</div>
+                  <div class="text-xs font-medium text-gray-200 leading-snug mb-2 line-clamp-2" :title="task.title">{{ task.title }}</div>
                   <div class="flex items-center justify-between gap-1">
                     <span class="text-xs px-1.5 py-0.5 rounded-md" :class="agentBadge(task.assigned_to)">
                       {{ task.assigned_to === 'human' ? '👤' : '🤖' }} {{ task.assigned_to }}
@@ -194,7 +194,7 @@ function cardClass(task: Task): string {
                   <div v-if="isPendingApproval(task)" class="flex items-center gap-1 mb-1.5">
                     <span class="text-xs text-amber-400 font-semibold">👤 {{ t('kanban.humanTask') }}</span>
                   </div>
-                  <div class="text-xs font-medium text-gray-200 leading-snug mb-2 line-clamp-2">
+                  <div class="text-xs font-medium text-gray-200 leading-snug mb-2 line-clamp-2" :title="task.title">
                     {{ task.title }}
                   </div>
                   <div class="flex items-center justify-between gap-1">
