@@ -1012,6 +1012,29 @@ func (h *Handler) handleFailedTask(task model.Task) {
 		if isTestTask(task) {
 			return
 		}
+		// Notify-placeholder guard: "prod fail notify[-suffix]" tasks (and their retry
+		// descendants) have no executable spec. They must NOT enter retry_routing.
+		// Auto-cancel and notify CEO once so it's visible but not re-queued.
+		if isNotifyPlaceholderTask(task) {
+			log.Printf("[handler] notify-placeholder task %s (%s) – auto-cancelling, no retry", task.ID, task.Title)
+			cancelStatus := model.StatusCancelled
+			cancelled, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
+				Status:    &cancelStatus,
+				ChangedBy: "system",
+				Version:   task.Version,
+				Note:      "auto-cancelled: notify-placeholder task (no executable spec)",
+			})
+			if err != nil {
+				log.Printf("[handler] notify-placeholder auto-cancel %s failed: %v", task.ID, err)
+			} else if h.sessionN != nil {
+				alert := cancelled
+				alert.FailureReason = "系统告警占位任务（prod fail notify），无可执行 spec，已自动 cancelled。如需处理请人工重新派单并补充 spec。"
+				if err := h.sessionN.OnFailed(alert); err != nil {
+					log.Printf("[handler] notify-placeholder notify CEO for %s failed: %v", task.ID, err)
+				}
+			}
+			return
+		}
 		// V31-P0: autoRetry depth cap (retry/fix/re-review) >= 3 → stop.
 		// Auto-cancel the failed task (chain is system-digestible, notify CEO once: depth cap reached (cancelled+notify).
 		retryDepth := strings.Count(task.Title, "retry:") + strings.Count(task.Title, "fix:") + strings.Count(task.Title, "re-review:")
@@ -1435,6 +1458,24 @@ func isTestTaskTitleAssignee(title, assignedTo string) bool {
 
 func isTestTask(t model.Task) bool {
 	return isTestTaskTitleAssignee(t.Title, t.AssignedTo)
+}
+
+// isNotifyPlaceholderTask returns true for "prod fail notify[-suffix]" tasks.
+// These are system-generated alert placeholders with no actual spec/description.
+// They must NOT enter retry_routing (no executable work to retry).
+func isNotifyPlaceholderTask(t model.Task) bool {
+	base := t.Title
+	// Strip any "retry: " / "fix: " / "re-review: " prefixes before checking.
+	for {
+		stripped := strings.TrimPrefix(base, "retry: ")
+		stripped = strings.TrimPrefix(stripped, "fix: ")
+		stripped = strings.TrimPrefix(stripped, "re-review: ")
+		if stripped == base {
+			break
+		}
+		base = stripped
+	}
+	return strings.HasPrefix(base, "prod fail notify")
 }
 
 // isBrowserRelayNotAttachedText detects Browser Relay not-attached errors (case-insensitive).
