@@ -961,11 +961,10 @@ func (h *Handler) handleFailedTask(task model.Task) {
 			return
 		}
 		// V31-P0: autoRetry depth cap (retry/fix/re-review) >= 3 → stop.
-		// Auto-cancel the failed task (chain is system-digestible, no CEO alert needed —
-		// CEO already knows the 3-level rule; only genuine business failures notify CEO).
+		// Auto-cancel the failed task (chain is system-digestible, notify CEO once: depth cap reached (cancelled+notify).
 		retryDepth := strings.Count(task.Title, "retry:") + strings.Count(task.Title, "fix:") + strings.Count(task.Title, "re-review:")
 		if retryDepth >= 3 {
-			log.Printf("[handler] retry depth cap reached for task %s (%s) – auto-cancelling, no CEO alert", task.ID, task.Title)
+			log.Printf("[handler] retry depth cap reached for task %s (%s) – auto-cancelling, CEO notified", task.ID, task.Title)
 			cancelStatus := model.StatusCancelled
 			if _, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
 				Status:    &cancelStatus,
@@ -975,7 +974,11 @@ func (h *Handler) handleFailedTask(task model.Task) {
 			}); err != nil {
 				log.Printf("[handler] retry depth cap auto-cancel %s failed: %v", task.ID, err)
 			}
-			return
+					// Notify CEO about depth-cap cancellation (cancelled+notify).
+		if h.sessionN != nil {
+			_ = h.sessionN.OnFailed(task)
+		}
+		return
 		}
 		// Priority 1: explicit retry_assigned_to field.
 		retryAgent := task.RetryAssignedTo
