@@ -343,12 +343,13 @@ func (h *Handler) checkAgentTimeouts() {
 // CheckAgentTimeouts is exported for testing.
 func (h *Handler) CheckAgentTimeouts() { h.checkAgentTimeouts() }
 
-// sweepNotifiedFailed auto-cancels failed tasks that have been CEO-notified for >4h.
-// These tasks are considered "acknowledged" — CEO has seen them and can follow up
-// via new tasks. Cleaning them up reduces dashboard noise.
+// sweepNotifiedFailed auto-cancels failed tasks that have been CEO-notified for >4h
+// (or AGENT_QUEUE_FAILED_MAX_AGE). Also cleans up done tasks older than 24h
+// (AGENT_QUEUE_DONE_MAX_AGE). Only CEO-notified failed tasks are cleaned;
+// "undigested" failed tasks (no ceo_notified_at) are preserved for CEO review.
 func (h *Handler) sweepNotifiedFailed() {
-	const threshold = 4 * time.Hour
-	tasks, err := h.store.ListNotifiedFailedOlderThan(threshold)
+	failedMaxAge := envDuration("AGENT_QUEUE_FAILED_MAX_AGE", 4*time.Hour)
+	tasks, err := h.store.ListNotifiedFailedOlderThan(failedMaxAge)
 	if err != nil {
 		log.Printf("[sweep_failed] ListNotifiedFailedOlderThan: %v", err)
 		return
@@ -364,6 +365,28 @@ func (h *Handler) sweepNotifiedFailed() {
 			log.Printf("[sweep_failed] auto-cancel %s failed: %v", task.ID, err)
 		} else {
 			log.Printf("[sweep_failed] auto-cancelled task %s (%s) – notified >4h ago", task.ID, task.Title)
+		}
+	}
+
+	// Sweep done tasks older than AGENT_QUEUE_DONE_MAX_AGE (default 24h).
+	doneMaxAge := envDuration("AGENT_QUEUE_DONE_MAX_AGE", 24*time.Hour)
+	doneTasks, err := h.store.ListDoneOlderThan(doneMaxAge)
+	if err != nil {
+		log.Printf("[sweep_done] ListDoneOlderThan: %v", err)
+		return
+	}
+	for _, task := range doneTasks {
+		// Soft-delete: mark as cancelled with a system note (preserves audit trail).
+		cancelStatus := model.StatusCancelled
+		if _, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
+			Status:    &cancelStatus,
+			ChangedBy: "system",
+			Version:   task.Version,
+			Note:      "auto-archived: done task >24h old",
+		}); err != nil {
+			log.Printf("[sweep_done] auto-archive %s failed: %v", task.ID, err)
+		} else {
+			log.Printf("[sweep_done] auto-archived done task %s (%s)", task.ID, task.Title)
 		}
 	}
 }

@@ -1027,6 +1027,28 @@ func (s *Store) ListNotifiedFailedOlderThan(threshold time.Duration) ([]model.Ta
 	return tasks, rows.Err()
 }
 
+// ListDoneOlderThan returns done tasks updated more than threshold ago.
+func (s *Store) ListDoneOlderThan(threshold time.Duration) ([]model.Task, error) {
+	cutoff := time.Now().UTC().Add(-threshold)
+	rows, err := s.db.Query(`
+		SELECT id, title, assigned_to, version FROM tasks
+		WHERE status = 'done'
+		  AND updated_at < ?`, cutoff.Format("2006-01-02T15:04:05.999999Z"))
+	if err != nil {
+		return nil, fmt.Errorf("ListDoneOlderThan: %w", err)
+	}
+	defer rows.Close()
+	var tasks []model.Task
+	for rows.Next() {
+		var t model.Task
+		if err := rows.Scan(&t.ID, &t.Title, &t.AssignedTo, &t.Version); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 func (s *Store) historyFor(id string) ([]model.HistoryItem, error) {
 	rows, err := s.db.Query(`
 		SELECT id, task_id, from_status, to_status, changed_by, note, changed_at
