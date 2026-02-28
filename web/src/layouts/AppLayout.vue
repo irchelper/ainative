@@ -9,7 +9,9 @@ const route = useRoute()
 const dashStore = useDashboardStore()
 const { t, locale } = useI18n()
 
-const todoCount = computed(() => dashStore.data?.todo.filter(t => t.requires_review === true).length ?? 0)
+const todoCount = computed(() =>
+  dashStore.data?.todo.filter(t => t.status === 'claimed' || t.status === 'in_progress').length ?? 0
+)
 const exceptionCount = computed(() => dashStore.data?.exceptions.length ?? 0)
 
 const navItems = computed(() => [

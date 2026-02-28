@@ -42,6 +42,7 @@ const columns: { key: TaskStatus; label: string; color: string }[] = [
   { key: 'done', label: '完成', color: 'text-green-400' },
   { key: 'blocked', label: '阻塞', color: 'text-orange-400' },
   { key: 'failed', label: '失败', color: 'text-red-400' },
+  { key: 'cancelled', label: '已取消', color: 'text-gray-500' },
 ]
 
 const tasksByStatus = computed(() => {

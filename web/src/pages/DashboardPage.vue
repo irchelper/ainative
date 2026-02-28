@@ -58,9 +58,12 @@ watch(searchQuery, (q) => {
   searchTimer = setTimeout(() => doSearch(q), 300)
 })
 
-// Todo tasks requiring human review (align with badge semantics)
+// Todo tasks: show active tasks (claimed or in_progress) assigned to human
+// requires_review filter removed — most tasks don't set this flag, causing empty panel
 const humanTodos = computed(() =>
-  (store.data?.todo ?? []).filter((t) => t.requires_review === true),
+  (store.data?.todo ?? []).filter(
+    (t) => t.status === 'claimed' || t.status === 'in_progress',
+  ),
 )
 const exceptions = computed(() => store.data?.exceptions ?? [])
 const todoCount = computed(() => humanTodos.value.length)
