@@ -2650,3 +2650,171 @@ UI 细节打磨：
 后端读取文件内容，prepend 到 description 前（支持 ~ 展开）；文件读取失败返回 400。
 
 DB schema：`ALTER TABLE tasks ADD COLUMN spec_file TEXT NOT NULL DEFAULT ''`
+
+
+---
+
+## V31 Failed/Blocked 降噪规则 v1 (commits: 489ed47, c851270, 727c36c)
+
+### 背景
+
+v1.0.0 发布后，多次出现 `vision` agent 因 Browser Relay 未 attach 导致无限退单循环（failed → autoRetry → 再次派给 vision → 再次失败），以及 retry 链路无上限增长的问题。V31 从三个维度系统性修复。
+
+---
+
+### 修复 A：Browser Relay 未 attach → 自动转 blocked (commit: 489ed47)
+
+#### 问题
+
+`vision` PATCH `{status: "failed", result: "Browser Relay cdpReady=false"}` 触发 `autoRetry`，任务被重新派发给 vision，形成无限循环。
+
+#### 修复（internal/handler/handler.go）
+
+在 `patchTask` handler 中，PATCH failed 写入 store 之前，检测 result/failure_reason 是否匹配 Browser Relay 未 attach 的特征文本：
+
+```go
+// V31-BrowserRelay: PATCH failed 时，若 result 匹配 Browser Relay 未 attach 文本
+// 自动将 status 改为 blocked，避免进入 failed/autoRetry/stale 路径
+if req.Status == StatusFailed && isBrowserRelayNotAttachedText(payload) {
+    req.Status = &blocked  // StatusBlocked
+    req.Result = "...original result...
+matched_rule=browser_relay_not_attached; route_reason=needs_user_attach"
+    req.Note = "browser relay not attached"
+}
+```
+
+**效果：**
+- vision agent 即使写了 PATCH failed，服务端自动转为 blocked
+- blocked 状态不触发 autoRetry，任务暂停等待用户手动恢复
+- CEO 看到 blocked 任务，attach Browser Relay 后手动 PATCH pending 重试
+
+---
+
+### 修复 B：autoRetry 深度上限 + coder 超时自重试 (commit: c851270)
+
+#### 问题1：retry 链路无上限增长
+
+任务标题中 `retry:`/`fix:`/`re-review:` 前缀可无限叠加（如 `fix: retry: fix: retry: fix: ...`），系统持续派发新任务，CEO 频道收到大量噪音通知。
+
+#### 修复：retry 深度 >= 3 时触发 CEO 告警并停止派发
+
+```go
+// handleFailedTask 中
+retryDepth := strings.Count(task.Title, "retry:") +
+              strings.Count(task.Title, "fix:") +
+              strings.Count(task.Title, "re-review:")
+if retryDepth >= 3 {
+    // 调用 OnFailed 通知 CEO，停止 autoRetry
+    h.sessionN.OnFailed(task)
+    return  // 不继续 autoRetry
+}
+```
+
+#### 问题2：coder agent_timeout 触发 catch-all 路由，任务派给无关 agent
+
+#### 修复：新增 retry_routing 规则（internal/db/db.go）
+
+```go
+// V31-P0-4: coder 超时 → coder 自重试（不走 catch-all）
+{"coder", "agent_timeout", "coder", 10}
+```
+
+---
+
+### 修复 C：changed_by 空字符串绕过 failed→done 权限检查 (commit: 727c36c)
+
+#### 问题
+
+V31-P1-C 新增的 `failed→done` 权限检查（只允许 original assignee 或 system）存在绕过漏洞：
+
+```go
+// 修复前：caller='' AND assignedTo='' → 条件为 false → 绕过权限检查
+if current.AssignedTo != req.ChangedBy && req.ChangedBy != "system" {
+    // 当两者都为空时，两个条件都为 false，整个 if 为 false → 不拒绝
+}
+```
+
+#### 修复（internal/store/store.go）
+
+```go
+// 修复后：空 changed_by 显式拒绝
+if req.ChangedBy == "" || (current.AssignedTo != req.ChangedBy && req.ChangedBy != "system") {
+    return ValidationError("failed→done: only original assignee or system may recover")
+}
+```
+
+- `changed_by == ""` 的匿名调用方直接返回 422
+- 不再因 `assignedTo == ""` 而侥幸通过
+
+---
+
+### 降噪规则总结（v1）
+
+| 规则 | 触发条件 | 处理方式 |
+|------|---------|---------|
+| Browser Relay 拦截 | PATCH failed result 含 cdpReady=false 等特征 | 服务端自动转 blocked |
+| retry 深度上限 | title 中 retry:/fix:/re-review: 计数 >= 3 | 停止 autoRetry，通知 CEO 介入 |
+| coder 超时自重试 | coder failed，failure_reason=agent_timeout | retry_routing → coder（不走 catch-all）|
+| 匿名 failed→done 拦截 | changed_by == "" | 422 ValidationError，拒绝恢复 |
+
+## Failed/Blocked 降噪规则 v1（运维速查）
+
+> 本节为 V31 降噪规则的运维侧速查汇总，含 V31 发布后补充的 [TEST] 识别规则。
+
+### 规则一：[TEST] 任务识别（测试任务隔离）
+
+**触发条件：**
+- `title`（case-insensitive）含 `[TEST]`、`[E2E]`、`e2e-`
+- 或 `assigned_to` 前缀为 `e2e-` / `test`
+
+**处理方式：**
+- 标记为测试任务，不触发 `notify_ceo_on_complete` 通知
+- 失败时不走 `retry_routing`，不产生 CEO 频道噪音
+- 用于隔离 e2e/集成测试场景产生的临时任务
+
+---
+
+### 规则二：Browser Relay 未 attach → 自动转 blocked
+
+**触发条件：**
+- PATCH `{status: "failed"}` 且 `result` 含 Browser Relay 未 attach 特征文本（`cdpReady=false` 等）
+
+**处理方式：**
+- 服务端自动将 `status` 从 `failed` 转为 `blocked`
+- `result` 追加 `matched_rule=browser_relay_not_attached; route_reason=needs_user_attach`
+- `blocked` 不触发 `autoRetry`，任务暂停等待用户手动 attach → CEO PATCH `pending` 恢复
+
+---
+
+### 规则三：autoRetry 深度上限（最大3次）
+
+**触发条件：**
+- `title` 中 `retry:`、`fix:`、`re-review:` 前缀累计计数 ≥ 3
+
+**处理方式：**
+- 停止 `autoRetry`，不再派发新任务
+- 调用 `OnFailed` 通知 CEO 介入
+- 防止 retry 链路无限增长（如 `fix: retry: fix: retry: fix: ...`）
+
+---
+
+### 规则四：coder 超时自重试
+
+**触发条件：**
+- `assigned_to = "coder"` 且 `failure_reason = "agent_timeout"`
+
+**处理方式：**
+- `retry_routing` 规则：`("coder", "agent_timeout", "coder", delay=10s)`
+- coder 超时优先重派给 coder 自己，不走 catch-all 路由
+- 避免超时任务被错误派给无关 agent
+
+---
+
+### 规则汇总
+
+| # | 规则名 | 触发条件 | 处理方式 |
+|---|--------|---------|---------|
+| 1 | [TEST] 识别 | title 含 [TEST]/[E2E]/e2e- 或 assigned_to 前缀 e2e-/test | 隔离测试任务，跳过 retry_routing / notify |
+| 2 | Browser Relay 拦截 | PATCH failed + result 含 cdpReady=false 特征 | 服务端自动转 blocked，等用户恢复 |
+| 3 | retry 深度上限 | title 中 retry:/fix:/re-review: 计数 ≥ 3 | 停止 autoRetry，通知 CEO 介入 |
+| 4 | coder 超时自重试 | coder failed，failure_reason=agent_timeout | retry_routing → coder（delay 10s） |
