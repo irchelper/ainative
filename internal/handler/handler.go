@@ -157,9 +157,7 @@ func (h *Handler) checkStaleTasks() {
 						continue
 					}
 					alertTask.FailureReason = fmt.Sprintf("stale max dispatches reached (%d/%d)", c.StaleDispatchCount, h.maxStaleDispatches)
-					if err2 := h.sessionN.OnFailed(alertTask); err2 != nil {
-						log.Printf("[stale_ticker] OnFailed CEO alert for %s: %v", c.ID, err2)
-					}
+					go h.sessionN.OnFailed(alertTask) // 方案C: async, don't block ticker
 				}
 				// Touch to reset countdown and avoid repeated alerts every tick.
 				if err := h.store.TouchUpdatedAt(c.ID); err != nil {
@@ -194,9 +192,7 @@ func (h *Handler) checkStaleTasks() {
 					continue
 				}
 				alertTask.FailureReason = fmt.Sprintf("stale max dispatches reached (%d/%d)", c.StaleDispatchCount, h.maxStaleDispatches)
-				if err2 := h.sessionN.OnFailed(alertTask); err2 != nil {
-					log.Printf("[stale_ticker] OnFailed CEO alert for %s: %v", c.ID, err2)
-				}
+				go h.sessionN.OnFailed(alertTask) // 方案C: async, don't block ticker
 			}
 			// Touch to reset countdown and avoid repeated alerts every tick.
 			if err := h.store.TouchUpdatedAt(c.ID); err != nil {
@@ -649,13 +645,13 @@ func (h *Handler) handleDispatchChain(w http.ResponseWriter, r *http.Request) {
 		resp.NotifyError = fmt.Sprintf("unknown agent %q – chain created but no session_send sent", first.AssignedTo)
 		log.Printf("[dispatch/chain] unknown agent %q – skipping sessions_send", first.AssignedTo)
 	} else if h.oc != nil {
-		msg := "[agent-queue] 你有新的待处理任务。请执行 poll 流程认领。"
-		if err := h.oc.SendToSession(sessionKey, msg); err != nil {
-			resp.NotifyError = err.Error()
-			log.Printf("[dispatch/chain] sessions_send to %s failed: %v", sessionKey, err)
-		} else {
-			resp.Notified = true
-		}
+		resp.Notified = true // optimistic: async send in progress
+		go func(sk, assignedTo string) {
+			msg := "[agent-queue] 你有新的待处理任务。请执行 poll 流程认领。"
+			if err := h.oc.SendToSession(sk, msg); err != nil {
+				log.Printf("[dispatch/chain] sessions_send to %s failed: %v", assignedTo, err)
+			}
+		}(sessionKey, first.AssignedTo)
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
