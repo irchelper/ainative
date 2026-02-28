@@ -1053,6 +1053,10 @@ func (h *Handler) autoRetry(original model.Task, retryAgent string) {
 			original.ID, newTask.ID, err)
 	}
 
+	// Auto-cancel the original failed task: it has been superseded and is now
+	// "system-digestible" — no human intervention needed, no CEO alert required.
+	h.cancelSupersededFailed(original.ID, newTask.ID)
+
 	h.dispatchToAgent(retryAgent, newTask.ID)
 }
 
@@ -1108,6 +1112,9 @@ func (h *Handler) autoRetryReviewReject(original, origDetail model.Task, retryAg
 		log.Printf("[handler] autoRetry SetSupersededBy failed (original %s → re-review %s): %v",
 			original.ID, reReviewTask.ID, err)
 	}
+
+	// Auto-cancel the original failed review task: superseded by re-review, system-digestible.
+	h.cancelSupersededFailed(original.ID, reReviewTask.ID)
 
 	// Dispatch only the fix task; re-review will be dispatched automatically
 	// when fix task reaches 'done' (unlockDependents → triggered → SessionNotifier.Dispatch).
@@ -1319,6 +1326,30 @@ func (h *Handler) depsMetTask(w http.ResponseWriter, _ *http.Request, id string)
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
+
+// cancelSupersededFailed transitions a failed task to cancelled after it has been
+// superseded by a retry task. This cleans up "system-digestible" failed tasks from
+// the board automatically, avoiding dashboard pollution.
+// The operation is best-effort: failure is logged but never blocks the retry flow.
+func (h *Handler) cancelSupersededFailed(failedID, supersededByID string) {
+	// Fetch current version for optimistic locking.
+	current, err := h.store.GetByID(failedID)
+	if err != nil {
+		log.Printf("[handler] cancelSupersededFailed: GetByID(%s) failed: %v", failedID, err)
+		return
+	}
+	cancelStatus := model.StatusCancelled
+	if _, _, err := h.store.PatchTask(failedID, model.PatchTaskRequest{
+		Status:    &cancelStatus,
+		ChangedBy: "system",
+		Version:   current.Version,
+		Note:      "auto-cancelled: superseded by retry task " + supersededByID,
+	}); err != nil {
+		log.Printf("[handler] cancelSupersededFailed: PatchTask(%s → cancelled) failed: %v", failedID, err)
+	} else {
+		log.Printf("[handler] cancelSupersededFailed: task %s auto-cancelled (superseded by %s)", failedID, supersededByID)
+	}
+}
 
 // isTestTaskTitleAssignee returns true for test tasks:
 // - title contains "[test]" (case-insensitive)
