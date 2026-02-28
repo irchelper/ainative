@@ -145,6 +145,35 @@ func (h *Handler) checkStaleTasks() {
 
 	// Post-filter: only tasks whose deps are met (inline deps check).
 	for _, c := range candidates {
+		// V31-TEST-SILENCE: test tasks do not re-dispatch; they still respect stale max alert.
+		if isTestTaskTitleAssignee(c.Title, c.AssignedTo) {
+			if c.StaleDispatchCount >= h.maxStaleDispatches {
+				log.Printf("[stale_ticker] test task %s (%s) reached max stale dispatches (%d), alerting CEO",
+					c.ID, c.Title, h.maxStaleDispatches)
+				if h.sessionN != nil {
+					alertTask, err2 := h.store.GetByID(c.ID)
+					if err2 != nil {
+						log.Printf("[stale_ticker] GetByID %s for CEO alert: %v", c.ID, err2)
+						continue
+					}
+					alertTask.FailureReason = fmt.Sprintf("stale max dispatches reached (%d/%d)", c.StaleDispatchCount, h.maxStaleDispatches)
+					if err2 := h.sessionN.OnFailed(alertTask); err2 != nil {
+						log.Printf("[stale_ticker] OnFailed CEO alert for %s: %v", c.ID, err2)
+					}
+				}
+				// Touch to reset countdown and avoid repeated alerts every tick.
+				if err := h.store.TouchUpdatedAt(c.ID); err != nil {
+					log.Printf("[stale_ticker] TouchUpdatedAt(%s): %v", c.ID, err)
+				}
+			} else {
+				// No re-dispatch for test tasks; just advance stale counter.
+				if err := h.store.TouchUpdatedAt(c.ID); err != nil {
+					log.Printf("[stale_ticker] TouchUpdatedAt(%s): %v", c.ID, err)
+				}
+			}
+			continue
+		}
+
 		met, err := h.store.DepsMet(c.ID)
 		if err != nil {
 			log.Printf("[stale_ticker] DepsMet(%s): %v", c.ID, err)
@@ -268,7 +297,7 @@ func (h *Handler) checkAgentTimeouts() {
 		// Timed out → PATCH failed
 		failedStatus := model.StatusFailed
 		reason := fmt.Sprintf("agent_timeout: exceeded %dmin SLA", timeoutMinutes)
-		_, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
+		failedTask, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
 			Status:        &failedStatus,
 			FailureReason: &reason,
 			Version:       task.Version,
@@ -279,12 +308,27 @@ func (h *Handler) checkAgentTimeouts() {
 			continue
 		}
 		log.Printf("[agent_timeout] task %s (%s) timed out after %dmin → failed (updated_at idle)",
-			task.ID, task.Title, timeoutMinutes)
+			failedTask.ID, failedTask.Title, timeoutMinutes)
+
+		// V31-TEST-SILENCE: auto-cancel test tasks and skip notifications.
+		if isTestTask(failedTask) {
+			cancelStatus := model.StatusCancelled
+			if _, _, err := h.store.PatchTask(failedTask.ID, model.PatchTaskRequest{
+				Status:    &cancelStatus,
+				Version:   failedTask.Version,
+				ChangedBy: "system",
+				Note:      "test task auto-cancel after failure",
+			}); err != nil {
+				log.Printf("[agent_timeout] auto-cancel test task %s failed: %v", failedTask.ID, err)
+			}
+			continue
+		}
+
 		// Notify CEO via SessionNotifier (same path as handleFailedTask)
 		if h.sessionN != nil {
-			task.FailureReason = reason
-			if err := h.sessionN.OnFailed(task); err != nil {
-				log.Printf("[agent_timeout] OnFailed notification for %s: %v", task.ID, err)
+			failedTask.FailureReason = reason
+			if err := h.sessionN.OnFailed(failedTask); err != nil {
+				log.Printf("[agent_timeout] OnFailed notification for %s: %v", failedTask.ID, err)
 			}
 		}
 	}
@@ -848,14 +892,29 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 
 	var blockedDownstream []model.BlockedDownstream
 	if task.Status == model.StatusFailed {
-		notify.AsyncNotify(h.notifier, task) // Discord webhook to user
-		h.handleFailedTask(task)             // SessionNotifier to CEO (if no auto-retry)
-
-		// V7: scan blocked downstream tasks (read-only).
-		if bd, err := h.store.ScanBlockedDownstream(id); err != nil {
-			log.Printf("[handler] ScanBlockedDownstream for %s: %v", id, err)
+		// V31-TEST-SILENCE: test tasks fail silently + auto-cancelled; no retry/stale/notify.
+		if isTestTask(task) {
+			cancelStatus := model.StatusCancelled
+			if cancelled, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
+				Status:    &cancelStatus,
+				Version:   task.Version,
+				ChangedBy: "system",
+				Note:      "test task auto-cancel after failure",
+			}); err != nil {
+				log.Printf("[handler] auto-cancel test task %s failed: %v", task.ID, err)
+			} else {
+				task = cancelled
+			}
 		} else {
-			blockedDownstream = bd
+			notify.AsyncNotify(h.notifier, task) // Discord webhook to user
+			h.handleFailedTask(task)             // SessionNotifier to CEO (if no auto-retry)
+
+			// V7: scan blocked downstream tasks (read-only).
+			if bd, err := h.store.ScanBlockedDownstream(id); err != nil {
+				log.Printf("[handler] ScanBlockedDownstream for %s: %v", id, err)
+			} else {
+				blockedDownstream = bd
+			}
 		}
 	}
 
@@ -877,6 +936,10 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 // Otherwise → SessionNotifier alerts CEO for human intervention.
 func (h *Handler) handleFailedTask(task model.Task) {
 	go func() {
+		// V31-TEST-SILENCE: test tasks do not enter retry_routing or notify.
+		if isTestTask(task) {
+			return
+		}
 		// Priority 1: explicit retry_assigned_to field.
 		retryAgent := task.RetryAssignedTo
 		// Priority 2: inline result format (legacy/expert shorthand).
@@ -1224,6 +1287,19 @@ func (h *Handler) depsMetTask(w http.ResponseWriter, _ *http.Request, id string)
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
+
+// isTestTaskTitleAssignee returns true for test tasks:
+// - title contains "[test]" (case-insensitive)
+// - assigned_to starts with "e2e-" (case-insensitive)
+func isTestTaskTitleAssignee(title, assignedTo string) bool {
+	lt := strings.ToLower(title)
+	la := strings.ToLower(assignedTo)
+	return strings.Contains(lt, "[test]") || strings.HasPrefix(la, "e2e-")
+}
+
+func isTestTask(t model.Task) bool {
+	return isTestTaskTitleAssignee(t.Title, t.AssignedTo)
+}
 
 func handleStoreError(w http.ResponseWriter, err error) {
 	switch {
