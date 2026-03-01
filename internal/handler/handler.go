@@ -1052,6 +1052,9 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 	var blockedDownstream []model.BlockedDownstream
 	if task.Status == model.StatusFailed {
 		// V31-TEST-SILENCE: test tasks fail silently + auto-cancelled; no retry/stale/notify.
+		// isNotifyPlaceholderTask is also silenced here (no user webhook, only CEO notify once
+		// in handleFailedTask). Both checks must happen BEFORE notify.AsyncNotify to prevent
+		// spurious "任务失败需介入" webhooks for system-digestible failures.
 		if isTestTask(task) {
 			cancelStatus := model.StatusCancelled
 			if cancelled, _, err := h.store.PatchTask(task.ID, model.PatchTaskRequest{
@@ -1064,6 +1067,10 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request, id string) {
 			} else {
 				task = cancelled
 			}
+		} else if isNotifyPlaceholderTask(task) {
+			// Notify-placeholder: skip user-facing webhook, let handleFailedTask
+			// send one CEO alert then auto-cancel. No retry. No user noise.
+			h.handleFailedTask(task)
 		} else {
 			notify.AsyncNotify(h.notifier, task) // Discord webhook to user
 			h.handleFailedTask(task)             // SessionNotifier to CEO (if no auto-retry)
