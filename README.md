@@ -55,7 +55,7 @@ Single binary. Zero external dependencies. Runs on your laptop.
 
 ## Quick Start
 
-> Agent flow: agents poll (`GET /tasks/poll?assigned_to=<agent>`), claim atomically, then PATCH results. For serial workflows, use `POST /dispatch/chain`.
+> Agent flow: agents poll (`GET /tasks/poll?assigned_to=<agent>`), claim atomically, then PATCH results. For serial workflows, use `POST /dispatch/chain` (or `POST /dispatch` for single tasks).
 
 ```bash
 # 1. Clone and build
