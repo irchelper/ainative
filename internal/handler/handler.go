@@ -1540,7 +1540,8 @@ func (h *Handler) cancelSupersededFailed(failedID, supersededByID string) {
 func isTestTaskTitleAssignee(title, assignedTo string) bool {
 	lt := strings.ToLower(title)
 	la := strings.ToLower(assignedTo)
-	return strings.Contains(lt, "[test]") || strings.HasPrefix(la, "e2e-")
+	// assigned_to == "test" is an explicit test sentinel (case-insensitive).
+	return strings.Contains(lt, "[test]") || strings.HasPrefix(la, "e2e-") || la == "test"
 }
 
 func isTestTask(t model.Task) bool {
