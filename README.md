@@ -201,6 +201,12 @@ make build
 # Edit launchd/com.irchelper.agent-queue.plist with your env vars
 bash scripts/launchd-install.sh
 curl http://localhost:19827/health   # verify
+
+Notes:
+- Update `launchd/com.irchelper.agent-queue.plist` with your real values (e.g. `AGENT_QUEUE_DISCORD_WEBHOOK_URL`, `AGENT_QUEUE_DISCORD_USER_ID`).
+- `KeepAlive: true` means launchd will restart the service if it crashes.
+- After editing the plist, reload the service (`launchctl unload` + `launchctl load`) for changes to take effect.
+- Logs: `~/Library/Logs/agent-queue/` (e.g. `stdout.log`).
 ```
 
 ### Linux (systemd)
