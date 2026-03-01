@@ -493,6 +493,11 @@ qa      → #测试工程师 频道
 
 > Note: F7–F10 form the “dispatch → poll → claim → patch” baseline for autonomous expert execution.
 
+**Terminology (dispatch vs chain vs poll):**
+- **`POST /dispatch` (dispatch)**: create a **single task** and notify the target agent session (best for one-step work).
+- **`POST /dispatch/chain` (dispatch/chain)**: create a **serial chain** (A→B→C) in one call; the server wires `depends_on` automatically (best for multi-step workflows).
+- **`GET /tasks/poll` (poll)**: agent-side **pull trigger** — agents discover pending work, then `POST /tasks/:id/claim` and `PATCH /tasks/:id` to report status/results.
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/dispatch` | 建任务 + sessions_send 唤醒专家，一步完成 |
