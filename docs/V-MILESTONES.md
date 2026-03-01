@@ -51,9 +51,10 @@ This document provides a concise, high-level summary of notable features by vers
   - Key commit: `e4d9281`
 - **Cleanup API improvements** — Test-task cleanup endpoint enhanced (e.g. `max_age` parameter).
   - Key commit: `8990dba`
-- **Settings page enhancements** — Settings page info/UX improved alongside related admin changes.
+- **Settings page enhancements** — Expanded system & integration visibility (version, agent list, DB path, PID/uptime/listen address), plus a test-data cleanup control and clearer webhook status display.
   - Key commit: `e4d9281`
 
 ### Commit range
 
-- `d6bf806`
+- `e4d9281` → `d6bf806` (badge/settings/admin improvements → config version bump).
+  - TBD: if ops defines V28 as a wider batch, adjust range accordingly.
