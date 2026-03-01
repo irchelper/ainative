@@ -100,6 +100,8 @@ ainative moves task state out of agent memory and into SQLite. Any agent can cra
 - **Serial chain dispatch** — `POST /dispatch/chain` creates a full chain with `depends_on` wired automatically
 - **CEO notifications** — Task/chain completion notifies CEO session via SessionNotifier (RetryQueue: 30s/60s/120s backoff)
 - **Auto retry routing** — Failed tasks route to the right agent automatically via `retry_routing` table
+  - Use `retry_assigned_to: <agent>` in the failure result to indicate the next assignee; the server creates a follow-up retry task automatically.
+  - `failed` is terminal for the original task (the retry is a new task); deep retry chains are capped to reduce noise.
 - **Stale task recovery** — Unclaimed tasks are re-dispatched after a configurable threshold
 - **Web UI** — Built-in SPA dashboard (Vue 3 + TypeScript + Tailwind); embed.FS, no separate server needed
 - **Discord webhooks** — Per-agent or global webhook for `done`/`failed` notifications
