@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-01
+
+### Added
+- **acceptance[]string 字段**（ACTION-1 Phase1）：Task/CreateTaskRequest/DispatchRequest/ChainTaskSpec/GraphNodeSpec/TemplateTaskSpec 加 `acceptance []string`（omitempty，JSON 序列化存 DB）；dispatch 无 description+spec_file 时 HTTP 201 + `warning` 字段软提示
+- **ceo_notified_at 字段**（B8-B）：tasks 表加 `ceo_notified_at DATETIME`，每次 CEO 告警后 stamp；`notifyFailedCEO()` helper 统一 OnFailed+stamp
+- **failed 4h 自动清理**（B8-B）：`sweepNotifiedFailed()` 将已通知 CEO 超 4h 的 failed 任务 auto-cancel（AGENT_QUEUE_FAILED_MAX_AGE env var）
+- **done 任务 24h 清理**（P0-2）：`ListDoneOlderThan` + sweepNotifiedFailed 扩展清理 done 任务（AGENT_QUEUE_DONE_MAX_AGE，默认 24h）
+- **agent_timeout/route 告警 trace 字段**：告警包含 original_task_id / title / assigned_to / started_at / timeout / matched_rule / recent_history(3条)
+- **TaskDetailPage 原始 JSON 折叠面板**：页面底部可展开查看完整 task JSON
+
+### Fixed
+- **auto-cancel 路径不发 failed webhook**：isNotifyPlaceholderTask 提前拦截，跳过用户 webhook
+- **prod fail notify 占位任务禁入 retry_routing**：`isNotifyPlaceholderTask()` 守卫，直接 auto-cancel + CEO 通知一次
+- **isTestTask 覆盖扩大**：新增 `assigned_to == "test"` 条件；`failure_reason == "test"` 精确匹配（B3）
+- **agent_timeout 误杀复核**（B5）：result 非空时跳过超时杀
+- **retryDepth ≥3 cancelled + notify CEO**：auto-cancel 后仍发一次 CEO 通知（可观测性）
+- **failed 终态 autoRetry 后原任务转 cancelled**：`cancelSupersededFailed()` helper
+- **webhook 通知延迟**：RetryQueue + async sessions_send（方案 A+B+C）
+- **Web UI 时区修复**：`formatTime` 加 `timeZone: Asia/Kuala_Lumpur`；launchd plist 加 TZ env
+- **failed→done 权限检查**：changed_by 必须是 assignee 或 system（V31-P1-C）
+- **isActive 精确前缀匹配**：/goals 与 /goals/new 独立高亮
+
+### Changed
+- 所有 CEO OnFailed 通过 `notifyFailedCEO()` 统一处理（stamp ceo_notified_at）
+- failed/done 清理阈值支持 env var（AGENT_QUEUE_FAILED_MAX_AGE / AGENT_QUEUE_DONE_MAX_AGE）
+
 ## [1.0.0] - 2026-02-27
 
 ### Added
