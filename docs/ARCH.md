@@ -491,6 +491,8 @@ qa      → #测试工程师 频道
 
 ### F7：POST /dispatch（原子化派发）
 
+> Note: F7–F10 form the “dispatch → poll → claim → patch” baseline for autonomous expert execution.
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/dispatch` | 建任务 + sessions_send 唤醒专家，一步完成 |

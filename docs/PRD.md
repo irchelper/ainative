@@ -343,6 +343,8 @@ type Notifier interface {
 
 ### F9: GET /tasks/poll（专家自驱认领）
 
+**Acceptance note:** docs should emphasize that polling is the default execution trigger (no CEO “push” required beyond dispatch).
+
 | 功能 | 描述 | 优先级 |
 |------|------|--------|
 | 自驱 poll | `GET /tasks/poll?assigned_to=X`，返回该 agent 最优可认领任务 | P0 |
