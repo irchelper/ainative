@@ -44,10 +44,8 @@ This document provides a concise, high-level summary of notable features by vers
 
 ### Feature summary
 
-- **Task export** — Export tasks as CSV/JSON.
-- **Keyboard shortcuts (first pass)** — Initial keyboard navigation and shortcut help UI.
-- **UI polish** — Small fixes around navigation mounting and page behaviors.
+- **Config version bump** — `/api/config` version bumped to `v28`.
 
 ### Commit range
 
-- `5be5357` → `e79a662`
+- `d6bf806`
