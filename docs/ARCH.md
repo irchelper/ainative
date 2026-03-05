@@ -1,6 +1,6 @@
 # agent-queue 架构说明
 
-> 版本：v11 | 更新：2026-02-27 | 代码基线：commit `e2f142a` — OnTaskComplete 单任务 notify_ceo_on_complete 支持
+> 版本：v31 | 更新：2026-03-05 | 代码基线：commit `727c36c` — V31 permissions+retry+test silence
 > 对应 PRD：`PRD.md`
 
 ---
